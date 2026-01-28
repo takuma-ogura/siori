@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::io::Write;
+use unicode_width::UnicodeWidthStr;
 
 // Debug logging helper
 fn debug_log(msg: &str) {
@@ -521,6 +522,12 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+        // Normalize full-width characters to ASCII (for Japanese IME support)
+        let code = match code {
+            KeyCode::Char(c) => KeyCode::Char(normalize_fullwidth(c)),
+            other => other,
+        };
+
         debug_log(&format!(
             "\n=== handle_key() | code={:?} | input_mode={:?} | tab={:?} ===",
             code, self.input_mode, self.tab
@@ -702,6 +709,22 @@ impl App {
     }
 }
 
+/// Normalize full-width ASCII characters to half-width (for Japanese IME support)
+fn normalize_fullwidth(c: char) -> char {
+    match c {
+        // Full-width lowercase a-z (U+FF41-U+FF5A) -> ASCII a-z (U+0061-U+007A)
+        '\u{FF41}'..='\u{FF5A}' => char::from_u32(c as u32 - 0xFF41 + 0x61).unwrap_or(c),
+        // Full-width uppercase A-Z (U+FF21-U+FF3A) -> ASCII A-Z (U+0041-U+005A)
+        '\u{FF21}'..='\u{FF3A}' => char::from_u32(c as u32 - 0xFF21 + 0x41).unwrap_or(c),
+        // Full-width digits 0-9 (U+FF10-U+FF19) -> ASCII 0-9 (U+0030-U+0039)
+        '\u{FF10}'..='\u{FF19}' => char::from_u32(c as u32 - 0xFF10 + 0x30).unwrap_or(c),
+        // Full-width space (U+3000) -> ASCII space
+        '\u{3000}' => ' ',
+        // Return as-is for other characters
+        _ => c,
+    }
+}
+
 fn format_relative_time(timestamp: i64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -802,10 +825,9 @@ fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Set cursor position in insert mode
     if app.input_mode == InputMode::Insert {
-        frame.set_cursor_position((
-            chunks[0].x + app.commit_message.len() as u16 + 1,
-            chunks[0].y + 1,
-        ));
+        // Use unicode width for correct cursor positioning with CJK characters
+        let cursor_x = chunks[0].x + app.commit_message.width() as u16 + 1;
+        frame.set_cursor_position((cursor_x, chunks[0].y + 1));
     }
 
     // Files list
@@ -1216,5 +1238,33 @@ mod tests {
         };
         assert_eq!(file.path, "test.rs");
         assert!(file.staged);
+    }
+
+    #[test]
+    fn test_normalize_fullwidth() {
+        // Full-width lowercase -> ASCII lowercase
+        assert_eq!(normalize_fullwidth('ａ'), 'a');
+        assert_eq!(normalize_fullwidth('ｚ'), 'z');
+        assert_eq!(normalize_fullwidth('ｃ'), 'c');
+        assert_eq!(normalize_fullwidth('ｑ'), 'q');
+
+        // Full-width uppercase -> ASCII uppercase
+        assert_eq!(normalize_fullwidth('Ａ'), 'A');
+        assert_eq!(normalize_fullwidth('Ｚ'), 'Z');
+        assert_eq!(normalize_fullwidth('Ｐ'), 'P');
+
+        // Full-width digits -> ASCII digits
+        assert_eq!(normalize_fullwidth('０'), '0');
+        assert_eq!(normalize_fullwidth('９'), '9');
+
+        // Full-width space -> ASCII space
+        assert_eq!(normalize_fullwidth('\u{3000}'), ' ');
+
+        // ASCII characters should remain unchanged
+        assert_eq!(normalize_fullwidth('a'), 'a');
+        assert_eq!(normalize_fullwidth(' '), ' ');
+
+        // Japanese characters should remain unchanged
+        assert_eq!(normalize_fullwidth('あ'), 'あ');
     }
 }
