@@ -1,4 +1,17 @@
 use anyhow::{Context, Result};
+use std::io::Write;
+
+// Debug logging helper
+fn debug_log(msg: &str) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/siori_debug.log")
+    {
+        let _ = writeln!(f, "{}", msg);
+    }
+}
+
 use crossterm::{
     ExecutableCommand,
     event::{
@@ -56,7 +69,7 @@ struct FileEntry {
     diff_stats: Option<(usize, usize)>, // (additions, deletions)
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum FileStatus {
     Added,
     Modified,
@@ -73,12 +86,19 @@ struct CommitEntry {
     remote_branches: Vec<String>,
 }
 
+/// 視覚リストのエントリ - files配列のどのエントリを指すか
+#[derive(Clone, Copy)]
+struct VisualEntry {
+    file_index: usize,
+}
+
 struct App {
     tab: Tab,
     running: bool,
     input_mode: InputMode,
     commit_message: String,
     files: Vec<FileEntry>,
+    visual_list: Vec<VisualEntry>, // 視覚的な表示順序
     commits: Vec<CommitEntry>,
     files_state: ListState,
     commits_state: ListState,
@@ -97,6 +117,7 @@ impl App {
             input_mode: InputMode::default(),
             commit_message: String::new(),
             files: Vec::new(),
+            visual_list: Vec::new(),
             commits: Vec::new(),
             files_state: ListState::default(),
             commits_state: ListState::default(),
@@ -124,12 +145,13 @@ impl App {
 
         let statuses = self.repo.statuses(Some(&mut opts))?;
         self.files.clear();
+        self.visual_list.clear();
 
+        // Pass 1: Collect all staged files
         for entry in statuses.iter() {
             let path = entry.path().unwrap_or("").to_string();
             let status = entry.status();
 
-            // Staged files
             if status.intersects(Status::INDEX_NEW | Status::INDEX_MODIFIED | Status::INDEX_DELETED)
             {
                 let file_status = if status.contains(Status::INDEX_NEW) {
@@ -141,18 +163,20 @@ impl App {
                 };
                 let diff_stats = self.get_diff_stats(&path, true);
                 self.files.push(FileEntry {
-                    path: path.clone(),
+                    path,
                     status: file_status,
                     staged: true,
                     diff_stats,
                 });
             }
+        }
 
-            // Unstaged/untracked files
-            if status.intersects(
-                Status::WT_NEW | Status::WT_MODIFIED | Status::WT_DELETED | Status::INDEX_MODIFIED,
-            ) && !status.contains(Status::INDEX_NEW)
-            {
+        // Pass 2: Collect all unstaged/untracked files
+        for entry in statuses.iter() {
+            let path = entry.path().unwrap_or("").to_string();
+            let status = entry.status();
+
+            if status.intersects(Status::WT_NEW | Status::WT_MODIFIED | Status::WT_DELETED) {
                 let file_status = if status.contains(Status::WT_NEW) {
                     FileStatus::Untracked
                 } else if status.contains(Status::WT_DELETED) {
@@ -160,22 +184,63 @@ impl App {
                 } else {
                     FileStatus::Modified
                 };
-                // Avoid duplicates for modified+staged
-                if !self.files.iter().any(|f| f.path == path && !f.staged) {
-                    let diff_stats = self.get_diff_stats(&path, false);
-                    self.files.push(FileEntry {
-                        path,
-                        status: file_status,
-                        staged: false,
-                        diff_stats,
-                    });
-                }
+                let diff_stats = self.get_diff_stats(&path, false);
+                self.files.push(FileEntry {
+                    path,
+                    status: file_status,
+                    staged: false,
+                    diff_stats,
+                });
             }
         }
 
+        // Build visual_list: maps visual position to files index
+        // STAGED section first, then CHANGES section
+        for (i, file) in self.files.iter().enumerate() {
+            if file.staged {
+                self.visual_list.push(VisualEntry { file_index: i });
+            }
+        }
+        for (i, file) in self.files.iter().enumerate() {
+            if !file.staged {
+                self.visual_list.push(VisualEntry { file_index: i });
+            }
+        }
+
+        // DEBUG: Log state after building visual_list
+        debug_log("\n=== refresh_status() completed ===");
+        debug_log(&format!("files.len() = {}", self.files.len()));
+        for (i, file) in self.files.iter().enumerate() {
+            debug_log(&format!(
+                "  files[{}] = {} | staged={} | status={:?}",
+                i, file.path, file.staged, file.status
+            ));
+        }
+        debug_log(&format!("visual_list.len() = {}", self.visual_list.len()));
+        for (i, ve) in self.visual_list.iter().enumerate() {
+            let file = &self.files[ve.file_index];
+            debug_log(&format!(
+                "  visual_list[{}] -> files[{}] = {} (staged={})",
+                i, ve.file_index, file.path, file.staged
+            ));
+        }
+        debug_log(&format!("files_state.selected() = {:?}", self.files_state.selected()));
+
         // Select first item if nothing selected
-        if self.files_state.selected().is_none() && !self.files.is_empty() {
+        if self.files_state.selected().is_none() && !self.visual_list.is_empty() {
             self.files_state.select(Some(0));
+        }
+
+        // Clamp selection to valid range
+        if let Some(idx) = self.files_state.selected()
+            && idx >= self.visual_list.len()
+        {
+            let new_idx = if self.visual_list.is_empty() {
+                None
+            } else {
+                Some(self.visual_list.len() - 1)
+            };
+            self.files_state.select(new_idx);
         }
 
         Ok(())
@@ -233,7 +298,8 @@ impl App {
         if revwalk.push_head().is_err() {
             return Ok(()); // No commits yet
         }
-        revwalk.set_sorting(git2::Sort::TIME)?;
+        // Ignore sorting errors on edge cases
+        let _ = revwalk.set_sorting(git2::Sort::TIME);
 
         let head_id = self.repo.head().ok().and_then(|h| h.target());
 
@@ -259,8 +325,11 @@ impl App {
             if i >= 100 {
                 break;
             }
-            let oid = oid?;
-            let commit = self.repo.find_commit(oid)?;
+            // Skip invalid commits instead of crashing
+            let Ok(oid) = oid else { continue };
+            let Ok(commit) = self.repo.find_commit(oid) else {
+                continue;
+            };
 
             let time = commit.time();
             let time_str = format_relative_time(time.seconds());
@@ -282,27 +351,96 @@ impl App {
     }
 
     fn stage_selected(&mut self) -> Result<()> {
-        let Some(idx) = self.files_state.selected() else {
+        debug_log("\n=== stage_selected() called ===");
+        debug_log(&format!("files_state.selected() = {:?}", self.files_state.selected()));
+        debug_log(&format!("visual_list.len() = {}", self.visual_list.len()));
+        debug_log(&format!("files.len() = {}", self.files.len()));
+
+        let Some(visual_idx) = self.files_state.selected() else {
+            debug_log("ERROR: No file selected");
+            self.message = Some(("No file selected".to_string(), true));
             return Ok(());
         };
-        let Some(file) = self.files.get(idx) else {
+        debug_log(&format!("visual_idx = {}", visual_idx));
+
+        let Some(visual_entry) = self.visual_list.get(visual_idx) else {
+            debug_log(&format!("ERROR: visual_list[{}] out of bounds", visual_idx));
+            self.message = Some(("Invalid selection".to_string(), true));
             return Ok(());
         };
+        debug_log(&format!("visual_entry.file_index = {}", visual_entry.file_index));
+
+        let Some(file) = self.files.get(visual_entry.file_index) else {
+            debug_log(&format!("ERROR: files[{}] out of bounds", visual_entry.file_index));
+            self.message = Some(("File not found".to_string(), true));
+            return Ok(());
+        };
+        debug_log(&format!(
+            "file = {} | staged={} | status={:?}",
+            file.path, file.staged, file.status
+        ));
 
         let mut index = self.repo.index()?;
-        if file.staged {
-            // Unstage: reset to HEAD
-            if let Ok(head) = self.repo.head().and_then(|h| h.peel_to_tree()) {
-                self.repo
-                    .reset_default(Some(head.as_object()), [&file.path])?;
+        let file_path = file.path.clone();
+        let file_status = file.status;
+        let is_staged = file.staged;
+        debug_log(&format!("Action: {} (is_staged={})", if is_staged { "UNSTAGE" } else { "STAGE" }, is_staged));
+
+        if is_staged {
+            // Unstage
+            if file_status == FileStatus::Added {
+                // INDEX_NEW: remove from index (for new files or initial repo)
+                index.remove_path(std::path::Path::new(&file_path))?;
+                index.write()?;
+                self.message = Some((format!("Unstaged (new): {}", file_path), false));
+            } else if let Ok(head_commit) = self.repo.head().and_then(|h| h.peel_to_commit()) {
+                // INDEX_MODIFIED/DELETED: reset to HEAD
+                match self
+                    .repo
+                    .reset_default(Some(head_commit.as_object()), [&file_path])
+                {
+                    Ok(_) => {
+                        self.message = Some((format!("Unstaged: {}", file_path), false));
+                    }
+                    Err(e) => {
+                        self.message = Some((format!("Unstage failed: {}", e), true));
+                    }
+                }
+            } else {
+                self.message = Some(("Cannot unstage: no HEAD".to_string(), true));
             }
         } else {
             // Stage
-            index.add_path(std::path::Path::new(&file.path))?;
+            if file_status == FileStatus::Deleted {
+                index.remove_path(std::path::Path::new(&file_path))?;
+            } else {
+                index.add_path(std::path::Path::new(&file_path))?;
+            }
             index.write()?;
+            self.message = Some((format!("Staged: {}", file_path), false));
         }
 
+        // Remember file info before refresh
+        let target_path = file_path.clone();
+        let target_staged = !is_staged; // After operation, staged status is flipped
+
         self.refresh_status()?;
+
+        // Find the file in its new position and update selection
+        for (i, ve) in self.visual_list.iter().enumerate() {
+            if let Some(f) = self.files.get(ve.file_index)
+                && f.path == target_path
+                && f.staged == target_staged
+            {
+                self.files_state.select(Some(i));
+                debug_log(&format!(
+                    "Cursor followed to visual_idx={} ({})",
+                    i, target_path
+                ));
+                break;
+            }
+        }
+
         Ok(())
     }
 
@@ -383,6 +521,11 @@ impl App {
     }
 
     fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+        debug_log(&format!(
+            "\n=== handle_key() | code={:?} | input_mode={:?} | tab={:?} ===",
+            code, self.input_mode, self.tab
+        ));
+
         // Clear message on any key
         self.message = None;
 
@@ -425,7 +568,7 @@ impl App {
     fn select_next(&mut self) {
         match self.tab {
             Tab::Files => {
-                let len = self.files.len();
+                let len = self.visual_list.len();
                 if len > 0 {
                     let i = self.files_state.selected().unwrap_or(0);
                     self.files_state.select(Some((i + 1) % len));
@@ -444,7 +587,7 @@ impl App {
     fn select_prev(&mut self) {
         match self.tab {
             Tab::Files => {
-                let len = self.files.len();
+                let len = self.visual_list.len();
                 if len > 0 {
                     let i = self.files_state.selected().unwrap_or(0);
                     self.files_state
@@ -463,10 +606,14 @@ impl App {
     }
 
     fn select_index(&mut self, index: usize) {
+        debug_log(&format!("select_index({}) called", index));
         match self.tab {
             Tab::Files => {
-                if index < self.files.len() {
+                if index < self.visual_list.len() {
                     self.files_state.select(Some(index));
+                    debug_log(&format!("files_state.selected() now = {:?}", self.files_state.selected()));
+                } else {
+                    debug_log(&format!("index {} >= visual_list.len() {}", index, self.visual_list.len()));
                 }
             }
             Tab::Log => {
@@ -490,10 +637,12 @@ impl App {
     }
 
     fn handle_click(&mut self, _x: u16, y: u16) -> Result<()> {
+        debug_log(&format!("\n=== handle_click() | y={} ===", y));
+
         // Layout: y=0 title, y=1-3 tabs, y=4-6 commit input, y=7+ files/commits
         // Tab area (y=1-3): click to switch tabs
         if (1..=3).contains(&y) {
-            // Simple toggle on tab bar click
+            debug_log("Clicked on tab area, switching tabs");
             self.tab = match self.tab {
                 Tab::Files => Tab::Log,
                 Tab::Log => Tab::Files,
@@ -504,23 +653,39 @@ impl App {
         // File/commit list area
         match self.tab {
             Tab::Files => {
-                // Files tab: y=4-6 is commit input, y=7 is STAGED header, y=8+ is file list
-                // Account for headers: STAGED at index 0, files, CHANGES header, more files
+                // Layout: y=7 STAGED header, y=8+ files
                 if y >= 8 {
                     let clicked_row = (y - 8) as usize;
-                    let staged_count = self.files.iter().filter(|f| f.staged).count();
+                    let staged_count = self.visual_list.iter()
+                        .filter(|v| self.files.get(v.file_index).is_some_and(|f| f.staged))
+                        .count();
 
-                    // Adjust for section headers
-                    let file_index = if clicked_row <= staged_count {
-                        // In staged section (skip STAGED header at row 0)
-                        clicked_row.saturating_sub(0)
+                    debug_log(&format!("clicked_row={} staged_count={}", clicked_row, staged_count));
+
+                    // Row 0 = STAGED header (skip)
+                    // Row 1..=staged_count = staged files (visual_list[0..staged_count])
+                    // Row staged_count+1 = CHANGES header (skip)
+                    // Row staged_count+2.. = unstaged files (visual_list[staged_count..])
+                    let visual_index = if clicked_row == 0 {
+                        debug_log("Clicked on STAGED header");
+                        None // STAGED header
+                    } else if clicked_row <= staged_count {
+                        debug_log(&format!("Clicked on staged file, visual_index={}", clicked_row - 1));
+                        Some(clicked_row - 1)
+                    } else if clicked_row == staged_count + 1 {
+                        debug_log("Clicked on CHANGES header");
+                        None // CHANGES header
                     } else {
-                        // In changes section (skip CHANGES header)
-                        clicked_row.saturating_sub(1)
+                        let idx = staged_count + (clicked_row - staged_count - 2);
+                        debug_log(&format!("Clicked on unstaged file, visual_index={}", idx));
+                        Some(idx)
                     };
 
-                    if file_index < self.files.len() {
-                        self.select_index(file_index);
+                    if let Some(idx) = visual_index
+                        && idx < self.visual_list.len()
+                    {
+                        debug_log(&format!("Selecting visual_index={}", idx));
+                        self.select_index(idx);
                     }
                 }
             }
@@ -675,6 +840,7 @@ fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         items.push(create_file_item(file, app));
     }
 
+    let items_len = items.len();
     let list = List::new(items)
         .highlight_style(Style::default().bg(colors::SELECTED))
         .highlight_symbol("> ");
@@ -689,6 +855,21 @@ fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
             idx + 2 // Skip both headers
         };
         adjusted_state.select(Some(adjusted_idx));
+
+        // DEBUG: Log render state (only once per second to avoid spam)
+        static LAST_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let last = LAST_LOG.load(std::sync::atomic::Ordering::Relaxed);
+        if now > last {
+            LAST_LOG.store(now, std::sync::atomic::Ordering::Relaxed);
+            debug_log(&format!(
+                "[render] visual_idx={} staged_count={} adjusted_idx={} items_len={}",
+                idx, staged_count, adjusted_idx, items_len
+            ));
+        }
     }
 
     frame.render_stateful_widget(list, chunks[1], &mut adjusted_state);
@@ -849,6 +1030,9 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
 // Main
 // ============================================================================
 fn run() -> Result<()> {
+    // Clear debug log on startup
+    let _ = std::fs::write("/tmp/siori_debug.log", "=== siori started ===\n");
+
     // Setup terminal
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
