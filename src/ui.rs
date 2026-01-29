@@ -213,9 +213,9 @@ fn render_log_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|(i, commit)| {
             let is_unpushed = i < ahead;
 
-            // Color: unpushed=yellow, pushed=blue
+            // Color: unpushed=white, pushed=blue
             let color = if is_unpushed {
-                colors::yellow()
+                colors::fg_bright()
             } else {
                 colors::blue()
             };
