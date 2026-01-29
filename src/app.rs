@@ -5,6 +5,15 @@ use ratatui::widgets::ListState;
 use std::path::PathBuf;
 
 // ============================================================================
+// Constants & Helpers
+// ============================================================================
+pub const HEAD_LABEL: &str = "[HEAD]";
+
+pub fn remote_label(branch: &str) -> String {
+    format!("[{branch}]")
+}
+
+// ============================================================================
 // Types
 // ============================================================================
 #[derive(Default, Clone, Copy, PartialEq, Debug)]
@@ -116,10 +125,15 @@ impl App {
         self.files.clear();
         self.visual_list.clear();
 
-        // Pass 1: staged files
+        let mut staged_indices = Vec::new();
+        let mut unstaged_indices = Vec::new();
+
+        // Single pass: collect all files
         for entry in statuses.iter() {
             let path = entry.path().unwrap_or("").to_string();
             let status = entry.status();
+
+            // Staged files
             if status.intersects(Status::INDEX_NEW | Status::INDEX_MODIFIED | Status::INDEX_DELETED)
             {
                 let file_status = if status.contains(Status::INDEX_NEW) {
@@ -130,19 +144,16 @@ impl App {
                     FileStatus::Modified
                 };
                 let diff_stats = self.get_diff_stats(&path, true);
+                staged_indices.push(self.files.len());
                 self.files.push(FileEntry {
-                    path,
+                    path: path.clone(),
                     status: file_status,
                     staged: true,
                     diff_stats,
                 });
             }
-        }
 
-        // Pass 2: unstaged/untracked files
-        for entry in statuses.iter() {
-            let path = entry.path().unwrap_or("").to_string();
-            let status = entry.status();
+            // Unstaged/untracked files
             if status.intersects(Status::WT_NEW | Status::WT_MODIFIED | Status::WT_DELETED) {
                 let file_status = if status.contains(Status::WT_NEW) {
                     FileStatus::Untracked
@@ -152,6 +163,7 @@ impl App {
                     FileStatus::Modified
                 };
                 let diff_stats = self.get_diff_stats(&path, false);
+                unstaged_indices.push(self.files.len());
                 self.files.push(FileEntry {
                     path,
                     status: file_status,
@@ -162,32 +174,16 @@ impl App {
         }
 
         // Build visual_list: staged first, then unstaged
-        for (i, file) in self.files.iter().enumerate() {
-            if file.staged {
-                self.visual_list.push(i);
-            }
-        }
-        for (i, file) in self.files.iter().enumerate() {
-            if !file.staged {
-                self.visual_list.push(i);
-            }
-        }
+        self.visual_list.extend(staged_indices);
+        self.visual_list.extend(unstaged_indices);
 
-        // Select first item if nothing selected
+        // Adjust selection
         if self.files_state.selected().is_none() && !self.visual_list.is_empty() {
             self.files_state.select(Some(0));
-        }
-
-        // Clamp selection to valid range
-        if let Some(idx) = self.files_state.selected()
+        } else if let Some(idx) = self.files_state.selected()
             && idx >= self.visual_list.len()
         {
-            let new_idx = if self.visual_list.is_empty() {
-                None
-            } else {
-                Some(self.visual_list.len() - 1)
-            };
-            self.files_state.select(new_idx);
+            self.files_state.select(self.visual_list.len().checked_sub(1));
         }
 
         Ok(())
@@ -528,31 +524,13 @@ impl App {
     // ========================================================================
     // Label helpers
     // ========================================================================
-    pub fn head_label(&self) -> &'static str {
-        "[HEAD]"
-    }
-
-    pub fn remote_label(&self, branch: &str) -> String {
-        format!("[{}]", branch)
-    }
-
     pub fn status_label(&self) -> String {
-        let Some((ahead, behind)) = self.ahead_behind else {
-            return String::new();
-        };
-        let mut parts = Vec::new();
-
-        if ahead > 0 {
-            parts.push(format!("↑{}", ahead));
-        }
-        if behind > 0 {
-            parts.push(format!("↓{}", behind));
-        }
-
-        if parts.is_empty() {
-            "synced".to_string()
-        } else {
-            parts.join("  ")
+        match self.ahead_behind {
+            None => String::new(),
+            Some((0, 0)) => "synced".to_string(),
+            Some((ahead, 0)) => format!("↑{}", ahead),
+            Some((0, behind)) => format!("↓{}", behind),
+            Some((ahead, behind)) => format!("↑{}  ↓{}", ahead, behind),
         }
     }
 

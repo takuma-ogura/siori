@@ -1,4 +1,4 @@
-use crate::app::{App, FileEntry, FileStatus, InputMode, Tab};
+use crate::app::{App, FileEntry, FileStatus, InputMode, Tab, HEAD_LABEL, remote_label};
 use crate::config::{Config, get_color};
 use ratatui::{
     prelude::*,
@@ -17,7 +17,6 @@ mod colors {
     use super::{config, get_color};
     use ratatui::style::Color;
 
-    pub fn bg() -> Color { Color::Reset }
     pub fn fg() -> Color { get_color(&config().colors.text, Color::Reset) }
     pub fn fg_bright() -> Color { get_color(&config().colors.text_bright, Color::White) }
     pub fn green() -> Color { get_color(&config().colors.staged, Color::Green) }
@@ -46,8 +45,7 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
         Span::styled("siori", Style::default().fg(colors::fg_bright()).bold()),
         Span::styled(" @ ", Style::default().fg(colors::dim())),
         Span::styled(repo_display, Style::default().fg(colors::green()).bold()),
-    ]))
-    .style(Style::default().bg(colors::bg()));
+    ]));
     frame.render_widget(title, chunks[0]);
 
     // Tabs
@@ -230,13 +228,13 @@ fn render_log_tab(frame: &mut Frame, app: &mut App, area: Rect) {
             ];
             if commit.is_head {
                 spans.push(Span::styled(
-                    format!(" {}", app.head_label()),
+                    format!(" {}", HEAD_LABEL),
                     Style::default().fg(colors::green()).bold(),
                 ));
             }
             for branch in &commit.remote_branches {
                 spans.push(Span::styled(
-                    format!(" {}", app.remote_label(branch)),
+                    format!(" {}", remote_label(branch)),
                     Style::default().fg(colors::blue()),
                 ));
             }
