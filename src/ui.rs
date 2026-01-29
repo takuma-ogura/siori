@@ -21,18 +21,22 @@ mod colors {
 pub fn ui(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let chunks = Layout::vertical([
-        Constraint::Length(1), // Title
+        Constraint::Length(1), // Title + Repo
         Constraint::Length(3), // Tabs
         Constraint::Min(0),    // Content
         Constraint::Length(3), // Hints
     ])
     .split(area);
 
-    // Title
-    let title = Paragraph::new(Span::styled(
-        "siori - minimal git",
-        Style::default().fg(colors::FG_BRIGHT).bold(),
-    ))
+    // Title with repo name
+    let base_dir = std::env::current_dir().unwrap_or_default();
+    let repo_display = repo_display_name(&app.repo_path, &base_dir);
+
+    let title = Paragraph::new(Line::from(vec![
+        Span::styled("siori", Style::default().fg(colors::FG_BRIGHT).bold()),
+        Span::styled(" @ ", Style::default().fg(colors::DIM)),
+        Span::styled(repo_display, Style::default().fg(colors::GREEN).bold()),
+    ]))
     .style(Style::default().bg(colors::BG));
     frame.render_widget(title, chunks[0]);
 
@@ -56,9 +60,11 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
     // Hints
     render_hints(frame, app, chunks[3]);
 
-    // Remote URL dialog (overlay)
-    if app.input_mode == InputMode::RemoteUrl {
-        render_remote_dialog(frame, app);
+    // Dialogs (overlays)
+    match app.input_mode {
+        InputMode::RemoteUrl => render_remote_dialog(frame, app),
+        InputMode::RepoSelect => render_repo_select_dialog(frame, app),
+        _ => {}
     }
 }
 
@@ -138,11 +144,7 @@ fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut adjusted_state = app.files_state.clone();
     if let Some(idx) = app.files_state.selected() {
         let staged_count = staged.len();
-        let adjusted_idx = if idx < staged_count {
-            idx + 1
-        } else {
-            idx + 2
-        };
+        let adjusted_idx = if idx < staged_count { idx + 1 } else { idx + 2 };
         adjusted_state.select(Some(adjusted_idx));
     }
 
@@ -173,24 +175,20 @@ fn create_file_item(file: &FileEntry) -> ListItem<'static> {
 }
 
 fn render_log_tab(frame: &mut Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(0),
-    ])
-    .split(area);
+    let chunks = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(area);
 
-    let ahead_behind_str = match app.ahead_behind {
-        Some((ahead, behind)) => format!(" ahead {}, behind {}", ahead, behind),
-        None => String::new(),
-    };
-
+    // Branch info with status label
+    let status_label = app.status_label();
     let branch_info = Paragraph::new(Line::from(vec![
         Span::styled("on ", Style::default().fg(colors::DIM)),
         Span::styled(
             app.branch_name.clone(),
             Style::default().fg(colors::GREEN).bold(),
         ),
-        Span::styled(ahead_behind_str, Style::default().fg(colors::DIM)),
+        Span::styled(
+            format!("  {}", status_label),
+            Style::default().fg(colors::YELLOW),
+        ),
     ]));
     frame.render_widget(branch_info, chunks[0]);
 
@@ -202,39 +200,48 @@ fn render_log_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         .enumerate()
         .map(|(i, commit)| {
             let is_unpushed = i < ahead;
-            let graph_color = if is_unpushed { colors::BLUE } else { colors::DIM };
 
-            let node = if commit.is_head {
-                "● "
+            // Color: HEAD=blue, unpushed=yellow, pushed=dim
+            let color = if commit.is_head {
+                colors::BLUE
             } else if is_unpushed {
-                "○ "
+                colors::YELLOW
             } else {
-                "● "
+                colors::DIM
             };
 
+            // Node symbol: HEAD/pushed=●, unpushed=○
+            let node = if commit.is_head || !is_unpushed {
+                "●"
+            } else {
+                "○"
+            };
+
+            // Line 1: node + message + labels
             let mut spans = vec![
-                Span::styled("│ ", Style::default().fg(graph_color)),
-                Span::styled(node, Style::default().fg(graph_color)),
+                Span::styled(format!("{} ", node), Style::default().fg(color)),
                 Span::styled(commit.message.clone(), Style::default().fg(colors::FG)),
             ];
             if commit.is_head {
                 spans.push(Span::styled(
-                    " [HEAD]",
+                    format!(" {}", app.head_label()),
                     Style::default().fg(colors::GREEN).bold(),
                 ));
             }
             for branch in &commit.remote_branches {
                 spans.push(Span::styled(
-                    format!(" [{}]", branch),
+                    format!(" {}", app.remote_label(branch)),
                     Style::default().fg(colors::BLUE),
                 ));
             }
+
+            // Line 2: graph line + hash + time
             ListItem::new(vec![
                 Line::from(spans),
-                Line::from(vec![Span::styled(
-                    format!("│     {} - {}", commit.id, commit.time),
-                    Style::default().fg(graph_color),
-                )]),
+                Line::from(Span::styled(
+                    format!("│ {} - {}", commit.id, commit.time),
+                    Style::default().fg(color),
+                )),
             ])
         })
         .collect();
@@ -247,27 +254,26 @@ fn render_log_tab(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
-    let hints = match app.tab {
-        Tab::Files => {
-            if app.input_mode == InputMode::Insert {
-                vec![("Enter", "commit"), ("Esc", "cancel")]
-            } else {
-                vec![
-                    ("Space", "stage"),
-                    ("c", "commit"),
-                    ("P", "push"),
-                    ("Tab", "log"),
-                    ("q", "quit"),
-                ]
-            }
-        }
-        Tab::Log => vec![
-            ("j/k", "navigate"),
-            ("P", "push"),
-            ("p", "pull"),
-            ("Tab", "files"),
-            ("q", "quit"),
-        ],
+    let hints = match app.input_mode {
+        InputMode::Insert => vec![("Enter", "commit"), ("Esc", "cancel")],
+        InputMode::RepoSelect => vec![("j/k", "move"), ("Enter", "select"), ("Esc", "cancel")],
+        InputMode::RemoteUrl => vec![("Enter", "add"), ("Esc", "cancel")],
+        InputMode::Normal => match app.tab {
+            Tab::Files => vec![
+                ("Space", "stage"),
+                ("c", "commit"),
+                ("P", "push"),
+                ("R", "repo"),
+                ("q", "quit"),
+            ],
+            Tab::Log => vec![
+                ("j/k", "navigate"),
+                ("P", "push"),
+                ("p", "pull"),
+                ("R", "repo"),
+                ("q", "quit"),
+            ],
+        },
     };
 
     let mut spans: Vec<Span> = Vec::new();
@@ -337,14 +343,75 @@ fn render_remote_dialog(frame: &mut Frame, app: &App) {
     frame.render_widget(Paragraph::new(lines), inner);
 
     // Cursor
-    frame.set_cursor_position((
-        inner.x + app.remote_url.width() as u16,
-        inner.y,
-    ));
+    frame.set_cursor_position((inner.x + app.remote_url.width() as u16, inner.y));
+}
+
+fn render_repo_select_dialog(frame: &mut Frame, app: &mut App) {
+    let base_dir = std::env::current_dir().unwrap_or_default();
+    let height = (app.available_repos.len() + 2).min(15) as u16;
+    let area = centered_rect(50, height, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Select Repository ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(colors::BLUE));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let items: Vec<ListItem> = app
+        .available_repos
+        .iter()
+        .map(|path| {
+            let name = repo_display_name(path, &base_dir);
+            let is_current = path == &app.repo_path;
+            let color = if is_current {
+                colors::GREEN
+            } else {
+                colors::FG
+            };
+            let suffix = if is_current { " (current)" } else { "" };
+            ListItem::new(Line::from(vec![
+                Span::styled(name, Style::default().fg(color)),
+                Span::styled(suffix, Style::default().fg(colors::DIM)),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .highlight_style(Style::default().bg(colors::SELECTED))
+        .highlight_symbol("> ");
+
+    frame.render_stateful_widget(list, inner, &mut app.repo_select_state);
 }
 
 pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     Rect::new(x, y, width.min(area.width), height.min(area.height))
+}
+
+/// Get display name for a repository path relative to base directory
+fn repo_display_name(path: &std::path::Path, base_dir: &std::path::Path) -> String {
+    path.strip_prefix(base_dir)
+        .map(|p| {
+            let s = p.display().to_string();
+            if s.is_empty() {
+                // Current directory - show its name
+                base_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(".")
+                    .to_string()
+            } else {
+                s
+            }
+        })
+        .unwrap_or_else(|_| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("repo")
+                .to_string()
+        })
 }

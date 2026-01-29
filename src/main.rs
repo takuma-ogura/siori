@@ -4,13 +4,12 @@ pub mod ui;
 use anyhow::{Context, Result};
 use crossterm::{
     ExecutableCommand,
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
-    },
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use git2::{Repository, Status, StatusOptions};
 use std::io::stdout;
+use std::time::{Duration, Instant};
 
 fn run() -> Result<()> {
     enable_raw_mode()?;
@@ -19,10 +18,11 @@ fn run() -> Result<()> {
     let mut terminal = ratatui::Terminal::new(ratatui::prelude::CrosstermBackend::new(stdout()))?;
 
     let mut app = app::App::new()?;
+    let mut last_refresh = Instant::now();
 
     while app.running {
         terminal.draw(|f| ui::ui(f, &mut app))?;
-        if event::poll(std::time::Duration::from_millis(100))? {
+        if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     app.handle_key(key.code, key.modifiers)?;
@@ -32,6 +32,11 @@ fn run() -> Result<()> {
                 }
                 _ => {}
             }
+        }
+        // 2秒ごとに自動リフレッシュ
+        if last_refresh.elapsed() >= Duration::from_secs(2) {
+            let _ = app.refresh();
+            last_refresh = Instant::now();
         }
     }
 
