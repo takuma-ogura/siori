@@ -213,21 +213,15 @@ fn render_log_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|(i, commit)| {
             let is_unpushed = i < ahead;
 
-            // Color: HEAD=blue, unpushed=yellow, pushed=dim
-            let color = if commit.is_head {
-                colors::blue()
-            } else if is_unpushed {
+            // Color: unpushed=yellow, pushed=blue
+            let color = if is_unpushed {
                 colors::yellow()
             } else {
-                colors::dim()
+                colors::blue()
             };
 
-            // Node symbol: HEAD/pushed=●, unpushed=○
-            let node = if commit.is_head || !is_unpushed {
-                "●"
-            } else {
-                "○"
-            };
+            // Node symbol: pushed=●, unpushed=○
+            let node = if is_unpushed { "○" } else { "●" };
 
             // Line 1: node + message + labels
             let mut spans = vec![

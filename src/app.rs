@@ -23,13 +23,6 @@ pub enum InputMode {
     RepoSelect,
 }
 
-#[derive(Default, Clone, Copy, PartialEq, Debug)]
-pub enum LabelMode {
-    #[default]
-    Friendly, // 日本語ラベル
-    Git, // Git用語
-}
-
 #[derive(Clone)]
 pub struct FileEntry {
     pub path: String,
@@ -59,7 +52,6 @@ pub struct App {
     pub tab: Tab,
     pub running: bool,
     pub input_mode: InputMode,
-    pub label_mode: LabelMode,
     pub commit_message: String,
     pub remote_url: String,
     pub files: Vec<FileEntry>,
@@ -88,7 +80,6 @@ impl App {
             tab: Tab::default(),
             running: true,
             input_mode: InputMode::default(),
-            label_mode: LabelMode::default(),
             commit_message: String::new(),
             remote_url: String::new(),
             files: Vec::new(),
@@ -535,46 +526,31 @@ impl App {
     }
 
     // ========================================================================
-    // Label helpers (for friendly/git mode)
+    // Label helpers
     // ========================================================================
     pub fn head_label(&self) -> &'static str {
-        match self.label_mode {
-            LabelMode::Friendly => "[自分]",
-            LabelMode::Git => "[HEAD]",
-        }
+        "[HEAD]"
     }
 
     pub fn remote_label(&self, branch: &str) -> String {
-        match self.label_mode {
-            LabelMode::Friendly => "[クラウド]".to_string(),
-            LabelMode::Git => format!("[{}]", branch),
-        }
+        format!("[{}]", branch)
     }
 
     pub fn status_label(&self) -> String {
         let Some((ahead, behind)) = self.ahead_behind else {
             return String::new();
         };
-        let friendly = self.label_mode == LabelMode::Friendly;
         let mut parts = Vec::new();
 
         if ahead > 0 {
-            parts.push(if friendly {
-                format!("{}件 未保存", ahead)
-            } else {
-                format!("↑{}", ahead)
-            });
+            parts.push(format!("↑{}", ahead));
         }
         if behind > 0 {
-            parts.push(if friendly {
-                format!("{}件 更新あり", behind)
-            } else {
-                format!("↓{}", behind)
-            });
+            parts.push(format!("↓{}", behind));
         }
 
         if parts.is_empty() {
-            if friendly { "同期済み" } else { "synced" }.to_string()
+            "synced".to_string()
         } else {
             parts.join("  ")
         }
@@ -884,8 +860,4 @@ mod tests {
         assert_eq!(result.y, 16); // (40 - 7) / 2
     }
 
-    #[test]
-    fn test_label_mode_default() {
-        assert_eq!(LabelMode::default(), LabelMode::Friendly);
-    }
 }
