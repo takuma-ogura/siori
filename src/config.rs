@@ -6,7 +6,23 @@ use std::path::PathBuf;
 pub struct Config {
     #[serde(default)]
     pub colors: ColorConfig,
+    #[serde(default)]
+    pub ui: UiConfig,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct UiConfig {
+    #[serde(default = "default_true")]
+    pub show_hints: bool,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self { show_hints: true }
+    }
+}
+
+fn default_true() -> bool { true }
 
 #[derive(Debug, Default, Deserialize)]
 pub struct ColorConfig {

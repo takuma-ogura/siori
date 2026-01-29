@@ -68,7 +68,9 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
     }
 
     // Hints
-    render_hints(frame, app, chunks[3]);
+    if config().ui.show_hints {
+        render_hints(frame, app, chunks[3]);
+    }
 
     // Dialogs (overlays)
     match app.input_mode {
@@ -273,14 +275,14 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
                 ("Space", "stage"),
                 ("c", "commit"),
                 ("P", "push"),
-                ("R", "repo"),
+                ("r", "repo"),
                 ("q", "quit"),
             ],
             Tab::Log => vec![
                 ("j/k", "navigate"),
                 ("P", "push"),
                 ("p", "pull"),
-                ("R", "repo"),
+                ("r", "repo"),
                 ("q", "quit"),
             ],
         },

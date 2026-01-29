@@ -638,8 +638,7 @@ impl App {
                 }
                 KeyCode::Char('P') => self.push()?,
                 KeyCode::Char('p') if self.tab == Tab::Log => self.pull()?,
-                KeyCode::Char('r') => self.refresh()?,
-                KeyCode::Char('R') => self.open_repo_select(),
+                KeyCode::Char('r') => self.open_repo_select(),
                 KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                     self.running = false;
                 }
