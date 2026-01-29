@@ -310,6 +310,15 @@ impl App {
         let file_status = file.status;
         let is_staged = file.staged;
 
+        // 操作前のセクション情報を記録
+        let old_staged_count = self.files.iter().filter(|f| f.staged).count();
+        let was_in_staged = visual_idx < old_staged_count;
+        let pos_in_section = if was_in_staged {
+            visual_idx
+        } else {
+            visual_idx - old_staged_count
+        };
+
         if is_staged {
             if file_status == FileStatus::Added {
                 index.remove_path(std::path::Path::new(&file_path))?;
@@ -336,18 +345,30 @@ impl App {
             self.message = Some((format!("Staged: {}", file_path), false));
         }
 
-        let target_staged = !is_staged;
         self.refresh_status()?;
 
-        // Follow cursor to the file's new position
-        for (i, &file_idx) in self.visual_list.iter().enumerate() {
-            if let Some(f) = self.files.get(file_idx)
-                && f.path == file_path
-                && f.staged == target_staged
-            {
-                self.files_state.select(Some(i));
-                break;
+        // 同じセクション内にカーソルを維持
+        let new_staged_count = self.files.iter().filter(|f| f.staged).count();
+        let new_changes_count = self.visual_list.len() - new_staged_count;
+
+        let new_idx = if was_in_staged {
+            if new_staged_count > 0 {
+                pos_in_section.min(new_staged_count - 1)
+            } else if new_changes_count > 0 {
+                new_staged_count // Changesの先頭へ
+            } else {
+                0
             }
+        } else if new_changes_count > 0 {
+            new_staged_count + pos_in_section.min(new_changes_count - 1)
+        } else if new_staged_count > 0 {
+            new_staged_count - 1 // Stagedの末尾へ
+        } else {
+            0
+        };
+
+        if !self.visual_list.is_empty() {
+            self.files_state.select(Some(new_idx));
         }
         Ok(())
     }
