@@ -1,4 +1,5 @@
 mod app;
+pub mod config;
 pub mod ui;
 
 use anyhow::{Context, Result};

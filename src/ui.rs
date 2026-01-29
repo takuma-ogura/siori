@@ -1,21 +1,31 @@
 use crate::app::{App, FileEntry, FileStatus, InputMode, Tab};
+use crate::config::{Config, get_color};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs},
 };
+use std::sync::OnceLock;
 use unicode_width::UnicodeWidthStr;
 
+static CONFIG: OnceLock<Config> = OnceLock::new();
+
+fn config() -> &'static Config {
+    CONFIG.get_or_init(Config::load)
+}
+
 mod colors {
+    use super::{config, get_color};
     use ratatui::style::Color;
-    pub const BG: Color = Color::Rgb(26, 27, 38);
-    pub const FG: Color = Color::Rgb(169, 177, 214);
-    pub const FG_BRIGHT: Color = Color::Rgb(192, 202, 245);
-    pub const GREEN: Color = Color::Rgb(158, 206, 106);
-    pub const YELLOW: Color = Color::Rgb(224, 175, 104);
-    pub const RED: Color = Color::Rgb(247, 118, 142);
-    pub const BLUE: Color = Color::Rgb(122, 162, 247);
-    pub const DIM: Color = Color::Rgb(86, 95, 137);
-    pub const SELECTED: Color = Color::Rgb(40, 52, 87);
+
+    pub fn bg() -> Color { Color::Reset }
+    pub fn fg() -> Color { get_color(&config().colors.text, Color::Reset) }
+    pub fn fg_bright() -> Color { get_color(&config().colors.text_bright, Color::White) }
+    pub fn green() -> Color { get_color(&config().colors.staged, Color::Green) }
+    pub fn yellow() -> Color { get_color(&config().colors.modified, Color::Yellow) }
+    pub fn red() -> Color { get_color(&config().colors.untracked, Color::Red) }
+    pub fn blue() -> Color { get_color(&config().colors.info, Color::Blue) }
+    pub fn dim() -> Color { get_color(&config().colors.dim, Color::DarkGray) }
+    pub fn selected() -> Color { get_color(&config().colors.selected_bg, Color::DarkGray) }
 }
 
 pub fn ui(frame: &mut Frame, app: &mut App) {
@@ -33,11 +43,11 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
     let repo_display = repo_display_name(&app.repo_path, &base_dir);
 
     let title = Paragraph::new(Line::from(vec![
-        Span::styled("siori", Style::default().fg(colors::FG_BRIGHT).bold()),
-        Span::styled(" @ ", Style::default().fg(colors::DIM)),
-        Span::styled(repo_display, Style::default().fg(colors::GREEN).bold()),
+        Span::styled("siori", Style::default().fg(colors::fg_bright()).bold()),
+        Span::styled(" @ ", Style::default().fg(colors::dim())),
+        Span::styled(repo_display, Style::default().fg(colors::green()).bold()),
     ]))
-    .style(Style::default().bg(colors::BG));
+    .style(Style::default().bg(colors::bg()));
     frame.render_widget(title, chunks[0]);
 
     // Tabs
@@ -46,8 +56,8 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
             Tab::Files => 0,
             Tab::Log => 1,
         })
-        .style(Style::default().fg(colors::DIM))
-        .highlight_style(Style::default().fg(colors::BLUE).bold())
+        .style(Style::default().fg(colors::dim()))
+        .highlight_style(Style::default().fg(colors::blue()).bold())
         .divider(" ");
     frame.render_widget(tabs, chunks[1]);
 
@@ -77,9 +87,9 @@ fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Commit input area
     let input_style = if app.input_mode == InputMode::Insert {
-        Style::default().fg(colors::FG_BRIGHT)
+        Style::default().fg(colors::fg_bright())
     } else {
-        Style::default().fg(colors::DIM)
+        Style::default().fg(colors::dim())
     };
 
     let input_text = if app.commit_message.is_empty() && app.input_mode != InputMode::Insert {
@@ -92,9 +102,9 @@ fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(if app.input_mode == InputMode::Insert {
-                colors::BLUE
+                colors::blue()
             } else {
-                colors::DIM
+                colors::dim()
             }))
             .title(if app.input_mode == InputMode::Insert {
                 " [INSERT] "
@@ -116,10 +126,10 @@ fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut items: Vec<ListItem> = Vec::new();
 
     items.push(ListItem::new(Line::from(vec![
-        Span::styled("STAGED ", Style::default().fg(colors::DIM).bold()),
+        Span::styled("STAGED ", Style::default().fg(colors::dim()).bold()),
         Span::styled(
             format!("({})", staged.len()),
-            Style::default().fg(colors::GREEN),
+            Style::default().fg(colors::green()),
         ),
     ])));
     for file in &staged {
@@ -127,10 +137,10 @@ fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     items.push(ListItem::new(Line::from(vec![
-        Span::styled("CHANGES ", Style::default().fg(colors::DIM).bold()),
+        Span::styled("CHANGES ", Style::default().fg(colors::dim()).bold()),
         Span::styled(
             format!("({})", unstaged.len()),
-            Style::default().fg(colors::YELLOW),
+            Style::default().fg(colors::yellow()),
         ),
     ])));
     for file in &unstaged {
@@ -138,7 +148,7 @@ fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let list = List::new(items)
-        .highlight_style(Style::default().bg(colors::SELECTED))
+        .highlight_style(Style::default().bg(colors::selected()))
         .highlight_symbol("> ");
 
     let mut adjusted_state = app.files_state.clone();
@@ -153,10 +163,10 @@ fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn create_file_item(file: &FileEntry) -> ListItem<'static> {
     let (status_char, status_color) = match file.status {
-        FileStatus::Added => ("A", colors::GREEN),
-        FileStatus::Modified => ("M", colors::YELLOW),
-        FileStatus::Deleted => ("D", colors::RED),
-        FileStatus::Untracked => ("??", colors::RED),
+        FileStatus::Added => ("A", colors::green()),
+        FileStatus::Modified => ("M", colors::yellow()),
+        FileStatus::Deleted => ("D", colors::red()),
+        FileStatus::Untracked => ("??", colors::red()),
     };
 
     let diff_str = match file.diff_stats {
@@ -169,8 +179,8 @@ fn create_file_item(file: &FileEntry) -> ListItem<'static> {
             format!("{:>2} ", status_char),
             Style::default().fg(status_color),
         ),
-        Span::styled(file.path.clone(), Style::default().fg(colors::FG)),
-        Span::styled(format!("  {}", diff_str), Style::default().fg(colors::DIM)),
+        Span::styled(file.path.clone(), Style::default().fg(colors::fg())),
+        Span::styled(format!("  {}", diff_str), Style::default().fg(colors::dim())),
     ]))
 }
 
@@ -180,14 +190,14 @@ fn render_log_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     // Branch info with status label
     let status_label = app.status_label();
     let branch_info = Paragraph::new(Line::from(vec![
-        Span::styled("on ", Style::default().fg(colors::DIM)),
+        Span::styled("on ", Style::default().fg(colors::dim())),
         Span::styled(
             app.branch_name.clone(),
-            Style::default().fg(colors::GREEN).bold(),
+            Style::default().fg(colors::green()).bold(),
         ),
         Span::styled(
             format!("  {}", status_label),
-            Style::default().fg(colors::YELLOW),
+            Style::default().fg(colors::yellow()),
         ),
     ]));
     frame.render_widget(branch_info, chunks[0]);
@@ -203,11 +213,11 @@ fn render_log_tab(frame: &mut Frame, app: &mut App, area: Rect) {
 
             // Color: HEAD=blue, unpushed=yellow, pushed=dim
             let color = if commit.is_head {
-                colors::BLUE
+                colors::blue()
             } else if is_unpushed {
-                colors::YELLOW
+                colors::yellow()
             } else {
-                colors::DIM
+                colors::dim()
             };
 
             // Node symbol: HEAD/pushed=●, unpushed=○
@@ -220,18 +230,18 @@ fn render_log_tab(frame: &mut Frame, app: &mut App, area: Rect) {
             // Line 1: node + message + labels
             let mut spans = vec![
                 Span::styled(format!("{} ", node), Style::default().fg(color)),
-                Span::styled(commit.message.clone(), Style::default().fg(colors::FG)),
+                Span::styled(commit.message.clone(), Style::default().fg(colors::fg())),
             ];
             if commit.is_head {
                 spans.push(Span::styled(
                     format!(" {}", app.head_label()),
-                    Style::default().fg(colors::GREEN).bold(),
+                    Style::default().fg(colors::green()).bold(),
                 ));
             }
             for branch in &commit.remote_branches {
                 spans.push(Span::styled(
                     format!(" {}", app.remote_label(branch)),
-                    Style::default().fg(colors::BLUE),
+                    Style::default().fg(colors::blue()),
                 ));
             }
 
@@ -247,7 +257,7 @@ fn render_log_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
 
     let list = List::new(items)
-        .highlight_style(Style::default().bg(colors::SELECTED))
+        .highlight_style(Style::default().bg(colors::selected()))
         .highlight_symbol("> ");
 
     frame.render_stateful_widget(list, chunks[1], &mut app.commits_state);
@@ -281,10 +291,10 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
         if i > 0 {
             spans.push(Span::styled("  ", Style::default()));
         }
-        spans.push(Span::styled(*key, Style::default().fg(colors::BLUE)));
+        spans.push(Span::styled(*key, Style::default().fg(colors::blue())));
         spans.push(Span::styled(
             format!(" {}", action),
-            Style::default().fg(colors::DIM),
+            Style::default().fg(colors::dim()),
         ));
     }
 
@@ -294,9 +304,9 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
             Line::from(Span::styled(
                 msg.clone(),
                 Style::default().fg(if *is_error {
-                    colors::RED
+                    colors::red()
                 } else {
-                    colors::GREEN
+                    colors::green()
                 }),
             )),
         ]
@@ -314,7 +324,7 @@ fn render_remote_dialog(frame: &mut Frame, app: &App) {
     let block = Block::default()
         .title(" Add Remote Repository ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(colors::BLUE));
+        .border_style(Style::default().fg(colors::blue()));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -328,16 +338,16 @@ fn render_remote_dialog(frame: &mut Frame, app: &App) {
                 &app.remote_url
             },
             Style::default().fg(if app.remote_url.is_empty() {
-                colors::DIM
+                colors::dim()
             } else {
-                colors::FG_BRIGHT
+                colors::fg_bright()
             }),
         )),
         Line::from(vec![
-            Span::styled("Enter", Style::default().fg(colors::BLUE)),
-            Span::styled(" add & push  ", Style::default().fg(colors::DIM)),
-            Span::styled("Esc", Style::default().fg(colors::BLUE)),
-            Span::styled(" cancel", Style::default().fg(colors::DIM)),
+            Span::styled("Enter", Style::default().fg(colors::blue())),
+            Span::styled(" add & push  ", Style::default().fg(colors::dim())),
+            Span::styled("Esc", Style::default().fg(colors::blue())),
+            Span::styled(" cancel", Style::default().fg(colors::dim())),
         ]),
     ];
     frame.render_widget(Paragraph::new(lines), inner);
@@ -355,7 +365,7 @@ fn render_repo_select_dialog(frame: &mut Frame, app: &mut App) {
     let block = Block::default()
         .title(" Select Repository ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(colors::BLUE));
+        .border_style(Style::default().fg(colors::blue()));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -367,20 +377,20 @@ fn render_repo_select_dialog(frame: &mut Frame, app: &mut App) {
             let name = repo_display_name(path, &base_dir);
             let is_current = path == &app.repo_path;
             let color = if is_current {
-                colors::GREEN
+                colors::green()
             } else {
-                colors::FG
+                colors::fg()
             };
             let suffix = if is_current { " (current)" } else { "" };
             ListItem::new(Line::from(vec![
                 Span::styled(name, Style::default().fg(color)),
-                Span::styled(suffix, Style::default().fg(colors::DIM)),
+                Span::styled(suffix, Style::default().fg(colors::dim())),
             ]))
         })
         .collect();
 
     let list = List::new(items)
-        .highlight_style(Style::default().bg(colors::SELECTED))
+        .highlight_style(Style::default().bg(colors::selected()))
         .highlight_symbol("> ");
 
     frame.render_stateful_widget(list, inner, &mut app.repo_select_state);
