@@ -296,6 +296,14 @@ impl App {
     }
 
     fn refresh_log_internal(&mut self, check_remote_tags: bool) -> Result<()> {
+        // Save previous tag pushed status before clearing
+        let previous_tag_status: std::collections::HashMap<String, bool> = self
+            .commits
+            .iter()
+            .flat_map(|c| c.tags.iter())
+            .map(|t| (t.name.clone(), t.pushed))
+            .collect();
+
         self.commits.clear();
         let Ok(mut revwalk) = self.repo.revwalk() else {
             return Ok(());
@@ -378,11 +386,7 @@ impl App {
                                 remote_tags.contains(name)
                             } else {
                                 // Keep previous pushed status if not checking remote
-                                self.commits
-                                    .iter()
-                                    .find(|c| c.full_id == oid)
-                                    .and_then(|c| c.tags.iter().find(|t| &t.name == name))
-                                    .is_some_and(|t| t.pushed)
+                                previous_tag_status.get(name).copied().unwrap_or(false)
                             },
                         })
                         .collect()
