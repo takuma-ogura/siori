@@ -96,6 +96,11 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
         InputMode::TagInput => render_tag_dialog(frame, app),
         _ => {}
     }
+
+    // Processing overlay (highest priority)
+    if app.processing.is_active() {
+        render_processing_overlay(frame, app);
+    }
 }
 
 fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -496,6 +501,25 @@ fn render_tag_dialog(frame: &mut Frame, app: &App) {
     // Cursor position
     let cursor_y = inner.y + if warning.is_some() { 2 } else { 1 };
     frame.set_cursor_position((inner.x + 5 + app.tag_input.width() as u16, cursor_y));
+}
+
+fn render_processing_overlay(frame: &mut Frame, app: &App) {
+    let area = centered_rect(30, 3, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(colors::blue()));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let text = format!("{} {}", app.spinner_char(), app.processing.message());
+    let paragraph = Paragraph::new(text)
+        .style(Style::default().fg(colors::fg_bright()))
+        .alignment(Alignment::Center);
+
+    frame.render_widget(paragraph, inner);
 }
 
 pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {

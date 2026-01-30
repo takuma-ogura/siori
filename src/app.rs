@@ -3,6 +3,8 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEven
 use git2::{DiffOptions, Repository, Status, StatusOptions};
 use ratatui::widgets::ListState;
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::thread::{self, JoinHandle};
 
 // ============================================================================
 // Constants & Helpers
@@ -16,6 +18,36 @@ pub fn remote_label(branch: &str) -> String {
 // ============================================================================
 // Types
 // ============================================================================
+
+/// Braille spinner characters for smooth animation
+pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Processing state for async operations
+#[derive(Clone, PartialEq, Debug)]
+pub enum Processing {
+    None,
+    Pushing,
+    Pulling,
+    Committing,
+    PushingTags,
+}
+
+impl Processing {
+    pub fn message(&self) -> &'static str {
+        match self {
+            Processing::None => "",
+            Processing::Pushing => "Pushing...",
+            Processing::Pulling => "Pulling...",
+            Processing::Committing => "Committing...",
+            Processing::PushingTags => "Pushing tags...",
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        *self != Processing::None
+    }
+}
+
 #[derive(Default, Clone, Copy, PartialEq, Debug)]
 pub enum Tab {
     #[default]
@@ -66,6 +98,9 @@ pub struct CommitEntry {
     pub tags: Vec<TagInfo>,
 }
 
+/// Result from background git operations
+pub type GitResult = std::result::Result<String, String>;
+
 pub struct App {
     pub tab: Tab,
     pub running: bool,
@@ -73,9 +108,8 @@ pub struct App {
     pub commit_message: String,
     pub remote_url: String,
     pub tag_input: String,
-    pub editing_tag: Option<String>, // Some if editing existing tag
+    pub editing_tag: Option<String>,
     pub files: Vec<FileEntry>,
-    /// Index mapping for visual list order (staged files first, then unstaged)
     pub visual_list: Vec<usize>,
     pub commits: Vec<CommitEntry>,
     pub files_state: ListState,
@@ -87,6 +121,12 @@ pub struct App {
     pub repo_path: PathBuf,
     pub available_repos: Vec<PathBuf>,
     pub repo_select_state: ListState,
+    // Processing state
+    pub processing: Processing,
+    pub spinner_frame: usize,
+    processing_rx: Option<mpsc::Receiver<GitResult>>,
+    #[allow(dead_code)]
+    processing_handle: Option<JoinHandle<()>>,
 }
 
 impl App {
@@ -116,6 +156,10 @@ impl App {
             repo_path,
             available_repos,
             repo_select_state: ListState::default(),
+            processing: Processing::None,
+            spinner_frame: 0,
+            processing_rx: None,
+            processing_handle: None,
         };
         app.refresh()?;
         Ok(app)
@@ -134,6 +178,52 @@ impl App {
         self.refresh_branch_info()?;
         self.refresh_log_local()?;
         Ok(())
+    }
+
+    // ========================================================================
+    // Processing state management
+    // ========================================================================
+
+    /// Advance spinner animation frame
+    pub fn tick_spinner(&mut self) {
+        self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+    }
+
+    /// Get current spinner character
+    pub fn spinner_char(&self) -> char {
+        SPINNER_FRAMES[self.spinner_frame]
+    }
+
+    /// Check if background operation completed and handle result
+    pub fn check_processing(&mut self) -> Result<()> {
+        if let Some(rx) = &self.processing_rx {
+            if let Ok(result) = rx.try_recv() {
+                match result {
+                    Ok(msg) => self.message = Some((msg, false)),
+                    Err(msg) => self.message = Some((msg, true)),
+                }
+                self.processing = Processing::None;
+                self.processing_rx = None;
+                self.processing_handle = None;
+                self.refresh()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Start a background git operation
+    fn start_processing<F>(&mut self, state: Processing, operation: F)
+    where
+        F: FnOnce() -> GitResult + Send + 'static,
+    {
+        let (tx, rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let result = operation();
+            let _ = tx.send(result);
+        });
+        self.processing = state;
+        self.processing_rx = Some(rx);
+        self.processing_handle = Some(handle);
     }
 
     fn refresh_status(&mut self) -> Result<()> {
@@ -538,67 +628,57 @@ impl App {
     }
 
     fn commit(&mut self) -> Result<()> {
-        let message = self.commit_message.trim();
+        let message = self.commit_message.trim().to_string();
         if message.is_empty() {
             self.message = Some(("Empty commit message".to_string(), true));
             return Ok(());
         }
 
-        // Scope the git2 objects to avoid borrow conflicts with refresh()
-        {
-            let mut index = self.repo.index()?;
-            let tree_id = index.write_tree()?;
-            let tree = self.repo.find_tree(tree_id)?;
-            let signature = self.repo.signature()?;
-            let parents: Vec<_> = self
-                .repo
-                .head()
-                .ok()
-                .and_then(|h| h.peel_to_commit().ok())
-                .into_iter()
-                .collect();
-            let parent_refs: Vec<_> = parents.iter().collect();
-            self.repo.commit(
-                Some("HEAD"),
-                &signature,
-                &signature,
-                message,
-                &tree,
-                &parent_refs,
-            )?;
-        }
-
         self.commit_message.clear();
         self.input_mode = InputMode::Normal;
-        self.message = Some(("Committed successfully".to_string(), false));
-        self.refresh()?;
+
+        self.start_processing(Processing::Committing, move || {
+            let output = std::process::Command::new("git")
+                .args(["commit", "-m", &message])
+                .output();
+
+            match output {
+                Ok(o) if o.status.success() => Ok("Committed successfully".to_string()),
+                Ok(o) => Err(format!("Commit failed: {}", String::from_utf8_lossy(&o.stderr).trim())),
+                Err(e) => Err(format!("Commit failed: {}", e)),
+            }
+        });
         Ok(())
     }
 
     fn push(&mut self) -> Result<()> {
-        let output = std::process::Command::new("git")
-            .args(["push"])
-            .output()
-            .context("Failed to execute git push")?;
+        // Quick check for remote configuration
+        let check = std::process::Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .output();
 
-        if output.status.success() {
-            self.message = Some(("Pushed successfully".to_string(), false));
-        } else {
-            let err = String::from_utf8_lossy(&output.stderr);
-            if err.contains("No configured push destination")
-                || err.contains("does not appear to be a git repository")
-            {
-                self.input_mode = InputMode::RemoteUrl;
-                self.remote_url.clear();
-                self.message = Some((
-                    "No remote configured. Enter repository URL:".to_string(),
-                    true,
-                ));
-                return Ok(());
-            }
-            self.message = Some((format!("Push failed: {}", err.trim()), true));
+        if check.is_err() || !check.unwrap().status.success() {
+            self.input_mode = InputMode::RemoteUrl;
+            self.remote_url.clear();
+            self.message = Some((
+                "No remote configured. Enter repository URL:".to_string(),
+                true,
+            ));
+            return Ok(());
         }
-        self.refresh()?;
+
+        // Run push in background
+        self.start_processing(Processing::Pushing, || {
+            let output = std::process::Command::new("git")
+                .args(["push"])
+                .output();
+
+            match output {
+                Ok(o) if o.status.success() => Ok("Pushed successfully".to_string()),
+                Ok(o) => Err(format!("Push failed: {}", String::from_utf8_lossy(&o.stderr).trim())),
+                Err(e) => Err(format!("Push failed: {}", e)),
+            }
+        });
         Ok(())
     }
 
@@ -641,17 +721,17 @@ impl App {
     }
 
     fn pull(&mut self) -> Result<()> {
-        let output = std::process::Command::new("git")
-            .args(["pull", "--no-rebase"])
-            .output()
-            .context("Failed to execute git pull")?;
-        if output.status.success() {
-            self.message = Some(("Pulled successfully".to_string(), false));
-        } else {
-            let err = String::from_utf8_lossy(&output.stderr);
-            self.message = Some((format!("Pull failed: {}", err.trim()), true));
-        }
-        self.refresh()?;
+        self.start_processing(Processing::Pulling, || {
+            let output = std::process::Command::new("git")
+                .args(["pull", "--no-rebase"])
+                .output();
+
+            match output {
+                Ok(o) if o.status.success() => Ok("Pulled successfully".to_string()),
+                Ok(o) => Err(format!("Pull failed: {}", String::from_utf8_lossy(&o.stderr).trim())),
+                Err(e) => Err(format!("Pull failed: {}", e)),
+            }
+        });
         Ok(())
     }
 
@@ -823,18 +903,17 @@ impl App {
     }
 
     fn push_tags(&mut self) -> Result<()> {
-        let output = std::process::Command::new("git")
-            .args(["push", "--tags"])
-            .output()
-            .context("Failed to push tags")?;
+        self.start_processing(Processing::PushingTags, || {
+            let output = std::process::Command::new("git")
+                .args(["push", "--tags"])
+                .output();
 
-        if output.status.success() {
-            self.message = Some(("Tags pushed successfully".to_string(), false));
-        } else {
-            let err = String::from_utf8_lossy(&output.stderr);
-            self.message = Some((format!("Push tags failed: {}", err.trim()), true));
-        }
-        self.refresh_log()?;
+            match output {
+                Ok(o) if o.status.success() => Ok("Tags pushed successfully".to_string()),
+                Ok(o) => Err(format!("Push tags failed: {}", String::from_utf8_lossy(&o.stderr).trim())),
+                Err(e) => Err(format!("Push tags failed: {}", e)),
+            }
+        });
         Ok(())
     }
 

@@ -22,27 +22,47 @@ fn run() -> Result<()> {
     let mut last_activity = Instant::now();
     let mut last_refresh = Instant::now();
 
+    let mut last_spinner_tick = Instant::now();
+
     while app.running {
         terminal.draw(|f| ui::ui(f, &mut app))?;
+
+        // Tick spinner animation (every 80ms)
+        if app.processing.is_active() {
+            if last_spinner_tick.elapsed() >= Duration::from_millis(80) {
+                app.tick_spinner();
+                last_spinner_tick = Instant::now();
+            }
+            // Check if background operation completed
+            app.check_processing()?;
+        }
 
         // 16ms polling for ~60fps responsiveness
         if event::poll(Duration::from_millis(16))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    app.handle_key(key.code, key.modifiers)?;
-                    last_activity = Instant::now();
+                    // Block input during processing
+                    if !app.processing.is_active() {
+                        app.handle_key(key.code, key.modifiers)?;
+                        last_activity = Instant::now();
+                    }
                 }
                 Event::Mouse(mouse) => {
-                    app.handle_mouse(mouse)?;
-                    last_activity = Instant::now();
+                    if !app.processing.is_active() {
+                        app.handle_mouse(mouse)?;
+                        last_activity = Instant::now();
+                    }
                 }
                 _ => {}
             }
         }
 
-        // Auto-refresh ONLY when idle (no input for 2+ seconds)
+        // Auto-refresh ONLY when idle (no input for 2+ seconds) and not processing
         let idle_time = last_activity.elapsed();
-        if idle_time >= Duration::from_secs(2) && last_refresh.elapsed() >= Duration::from_secs(3) {
+        if !app.processing.is_active()
+            && idle_time >= Duration::from_secs(2)
+            && last_refresh.elapsed() >= Duration::from_secs(3)
+        {
             let _ = app.refresh_status_only();
             last_refresh = Instant::now();
         }
