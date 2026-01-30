@@ -34,10 +34,6 @@ Download the latest binary from [Releases](https://github.com/takuma-ogura/siori
 curl -sL https://github.com/takuma-ogura/siori/releases/latest/download/siori-aarch64-apple-darwin.tar.gz | tar xz
 sudo mv siori /usr/local/bin/
 
-# macOS (Intel)
-curl -sL https://github.com/takuma-ogura/siori/releases/latest/download/siori-x86_64-apple-darwin.tar.gz | tar xz
-sudo mv siori /usr/local/bin/
-
 # Linux (x86_64)
 curl -sL https://github.com/takuma-ogura/siori/releases/latest/download/siori-x86_64-unknown-linux-gnu.tar.gz | tar xz
 sudo mv siori /usr/local/bin/
