@@ -528,7 +528,7 @@ impl App {
 
     fn pull(&mut self) -> Result<()> {
         let output = std::process::Command::new("git")
-            .args(["pull"])
+            .args(["pull", "--no-rebase"])
             .output()
             .context("Failed to execute git pull")?;
         if output.status.success() {
