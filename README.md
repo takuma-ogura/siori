@@ -5,6 +5,8 @@ A simple Git TUI for vibe coders.
 ![Rust](https://img.shields.io/badge/rust-1.85+-orange.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
+English | [日本語](README.ja.md)
+
 ## Features
 
 - **Compact UI** - Designed for narrow terminal panes
@@ -19,7 +21,8 @@ A simple Git TUI for vibe coders.
 ### Homebrew (macOS/Linux)
 
 ```bash
-brew install takuma-ogura/siori/siori
+brew tap takuma-ogura/siori
+brew install siori
 ```
 
 ### GitHub Releases
@@ -81,6 +84,9 @@ siori
 | Key | Action |
 |-----|--------|
 | `j` / `k` | Navigate commits |
+| `t` | Create tag |
+| `T` | Push tags |
+| `d` | Delete tag |
 | `P` | Push |
 | `p` | Pull |
 | `Tab` | Switch to Files tab |
