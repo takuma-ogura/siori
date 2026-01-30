@@ -78,15 +78,110 @@ jobs:
           files: |
             artifacts/**/*
 
-  # Uncomment after setting up homebrew-siori repository
-  # homebrew:
-  #   name: Update Homebrew
-  #   needs: release
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Update Homebrew formula
-  #       uses: dawidd6/action-homebrew-bump-formula@v3
-  #       with:
-  #         token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-  #         tap: takuma-ogura/siori
-  #         formula: siori
+  homebrew:
+    name: Update Homebrew Formula
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Wait for release assets
+        run: sleep 30
+
+      - name: Download and calculate checksums
+        id: checksums
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+
+          # Download release assets
+          curl -sL "https://github.com/takuma-ogura/siori/releases/download/v${VERSION}/siori-aarch64-apple-darwin.tar.gz" -o darwin-arm.tar.gz
+          curl -sL "https://github.com/takuma-ogura/siori/releases/download/v${VERSION}/siori-x86_64-unknown-linux-gnu.tar.gz" -o linux.tar.gz
+
+          # Calculate SHA256
+          DARWIN_ARM_SHA=$(sha256sum darwin-arm.tar.gz | cut -d' ' -f1)
+          LINUX_SHA=$(sha256sum linux.tar.gz | cut -d' ' -f1)
+
+          echo "darwin_arm_sha=${DARWIN_ARM_SHA}" >> $GITHUB_OUTPUT
+          echo "linux_sha=${LINUX_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Checkout homebrew-siori
+        uses: actions/checkout@v4
+        with:
+          repository: takuma-ogura/homebrew-siori
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-siori
+
+      - name: Update formula
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          DARWIN_ARM_SHA=${{ steps.checksums.outputs.darwin_arm_sha }}
+          LINUX_SHA=${{ steps.checksums.outputs.linux_sha }}
+
+          cat > homebrew-siori/Formula/siori.rb << 'EOF'
+          class Siori < Formula
+            desc "A simple Git TUI for vibe coders"
+            homepage "https://github.com/takuma-ogura/siori"
+            version "VERSION_PLACEHOLDER"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/takuma-ogura/siori/releases/download/vVERSION_PLACEHOLDER/siori-aarch64-apple-darwin.tar.gz"
+                sha256 "DARWIN_ARM_SHA_PLACEHOLDER"
+              end
+              on_intel do
+                # Intel Mac: build from source
+                url "https://github.com/takuma-ogura/siori.git", tag: "vVERSION_PLACEHOLDER"
+                depends_on "rust" => :build
+              end
+            end
+
+            on_linux do
+              on_intel do
+                url "https://github.com/takuma-ogura/siori/releases/download/vVERSION_PLACEHOLDER/siori-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "LINUX_SHA_PLACEHOLDER"
+              end
+            end
+
+            def install
+              if build.head? || (Hardware::CPU.intel? && OS.mac?)
+                system "cargo", "install", "--locked", "--root", prefix, "--path", "."
+              else
+                bin.install "siori"
+              end
+            end
+
+            test do
+              assert_match "siori", shell_output("#{bin}/siori --help")
+            end
+          end
+          EOF
+
+          # Replace placeholders
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" homebrew-siori/Formula/siori.rb
+          sed -i "s/DARWIN_ARM_SHA_PLACEHOLDER/${DARWIN_ARM_SHA}/g" homebrew-siori/Formula/siori.rb
+          sed -i "s/LINUX_SHA_PLACEHOLDER/${LINUX_SHA}/g" homebrew-siori/Formula/siori.rb
+
+      - name: Commit and push
+        run: |
+          cd homebrew-siori
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/siori.rb
+          git commit -m "Update siori to v${{ steps.version.outputs.version }}"
+          git push
+
+  crates-io:
+    name: Publish to crates.io
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish to crates.io
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}

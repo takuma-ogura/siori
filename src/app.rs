@@ -154,8 +154,7 @@ impl App {
             if new_count == old_count {
                 // Just check if paths have changed
                 let mut paths_match = true;
-                let mut i = 0;
-                for entry in statuses.iter() {
+                for (i, entry) in statuses.iter().enumerate() {
                     if i >= self.files.len() {
                         paths_match = false;
                         break;
@@ -165,7 +164,6 @@ impl App {
                         paths_match = false;
                         break;
                     }
-                    i += 1;
                 }
                 if paths_match {
                     return Ok(()); // No changes, skip rebuild
