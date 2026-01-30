@@ -34,9 +34,9 @@ fn run() -> Result<()> {
                 _ => {}
             }
         }
-        // 2秒ごとに自動リフレッシュ
+        // 2秒ごとに自動リフレッシュ（ステータスのみ、ネットワーク呼び出しなし）
         if last_refresh.elapsed() >= Duration::from_secs(2) {
-            let _ = app.refresh();
+            let _ = app.refresh_status_only();
             last_refresh = Instant::now();
         }
     }

@@ -128,6 +128,13 @@ impl App {
         Ok(())
     }
 
+    /// Lightweight refresh for auto-refresh (no network calls)
+    pub fn refresh_status_only(&mut self) -> Result<()> {
+        self.refresh_status()?;
+        self.refresh_branch_info()?;
+        Ok(())
+    }
+
     fn refresh_status(&mut self) -> Result<()> {
         let mut opts = StatusOptions::new();
         opts.include_untracked(true)
@@ -355,10 +362,15 @@ impl App {
             return Ok(());
         };
 
-        let mut index = self.repo.index()?;
         let file_path = file.path.clone();
         let file_status = file.status;
         let is_staged = file.staged;
+
+        // Check if path is a directory (ends with '/' or is actually a directory)
+        let is_directory = file_path.ends_with('/') || {
+            let workdir = self.repo.workdir().unwrap_or(self.repo.path());
+            workdir.join(&file_path).is_dir()
+        };
 
         // 操作前のセクション情報を記録
         let old_staged_count = self.files.iter().filter(|f| f.staged).count();
@@ -370,7 +382,26 @@ impl App {
         };
 
         if is_staged {
-            if file_status == FileStatus::Added {
+            // Unstaging
+            if is_directory {
+                // Use git command for directories
+                let output = std::process::Command::new("git")
+                    .args(["reset", "HEAD", "--", &file_path])
+                    .output();
+                match output {
+                    Ok(out) if out.status.success() => {
+                        self.message = Some((format!("Unstaged: {}", file_path), false));
+                    }
+                    Ok(out) => {
+                        let err = String::from_utf8_lossy(&out.stderr);
+                        self.message = Some((format!("Unstage failed: {}", err.trim()), true));
+                    }
+                    Err(e) => {
+                        self.message = Some((format!("Unstage failed: {}", e), true));
+                    }
+                }
+            } else if file_status == FileStatus::Added {
+                let mut index = self.repo.index()?;
                 index.remove_path(std::path::Path::new(&file_path))?;
                 index.write()?;
                 self.message = Some((format!("Unstaged (new): {}", file_path), false));
@@ -386,13 +417,34 @@ impl App {
                 self.message = Some(("Cannot unstage: no HEAD".to_string(), true));
             }
         } else {
-            if file_status == FileStatus::Deleted {
-                index.remove_path(std::path::Path::new(&file_path))?;
+            // Staging
+            if is_directory {
+                // Use git command for directories (handles recursive add properly)
+                let output = std::process::Command::new("git")
+                    .args(["add", "--", &file_path])
+                    .output();
+                match output {
+                    Ok(out) if out.status.success() => {
+                        self.message = Some((format!("Staged: {}", file_path), false));
+                    }
+                    Ok(out) => {
+                        let err = String::from_utf8_lossy(&out.stderr);
+                        self.message = Some((format!("Stage failed: {}", err.trim()), true));
+                    }
+                    Err(e) => {
+                        self.message = Some((format!("Stage failed: {}", e), true));
+                    }
+                }
             } else {
-                index.add_path(std::path::Path::new(&file_path))?;
+                let mut index = self.repo.index()?;
+                if file_status == FileStatus::Deleted {
+                    index.remove_path(std::path::Path::new(&file_path))?;
+                } else {
+                    index.add_path(std::path::Path::new(&file_path))?;
+                }
+                index.write()?;
+                self.message = Some((format!("Staged: {}", file_path), false));
             }
-            index.write()?;
-            self.message = Some((format!("Staged: {}", file_path), false));
         }
 
         self.refresh_status()?;
