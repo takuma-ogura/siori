@@ -22,7 +22,9 @@ impl Default for UiConfig {
     }
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Default, Deserialize)]
 pub struct ColorConfig {
@@ -56,11 +58,7 @@ fn config_path() -> Option<PathBuf> {
     // 2. OS標準: ~/Library/Application Support/siori/ (macOS)
     let proj_dirs = directories::ProjectDirs::from("", "", "siori")?;
     let path = proj_dirs.config_dir().join("config.toml");
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
+    if path.exists() { Some(path) } else { None }
 }
 
 /// 文字列からColorに変換
@@ -95,5 +93,7 @@ pub fn parse_color(s: &str, default: Color) -> Color {
 
 /// 設定から色を取得、なければデフォルト
 pub fn get_color(opt: &Option<String>, default: Color) -> Color {
-    opt.as_ref().map(|s| parse_color(s, default)).unwrap_or(default)
+    opt.as_ref()
+        .map(|s| parse_color(s, default))
+        .unwrap_or(default)
 }

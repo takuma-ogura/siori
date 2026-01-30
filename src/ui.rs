@@ -1,4 +1,4 @@
-use crate::app::{App, FileEntry, FileStatus, InputMode, Tab, HEAD_LABEL, remote_label};
+use crate::app::{App, FileEntry, FileStatus, HEAD_LABEL, InputMode, Tab, remote_label};
 use crate::config::{Config, get_color};
 use ratatui::{
     prelude::*,
@@ -17,14 +17,33 @@ mod colors {
     use super::{config, get_color};
     use ratatui::style::Color;
 
-    pub fn fg() -> Color { get_color(&config().colors.text, Color::Reset) }
-    pub fn fg_bright() -> Color { get_color(&config().colors.text_bright, Color::White) }
-    pub fn green() -> Color { get_color(&config().colors.staged, Color::Green) }
-    pub fn yellow() -> Color { get_color(&config().colors.modified, Color::Yellow) }
-    pub fn red() -> Color { get_color(&config().colors.untracked, Color::Red) }
-    pub fn blue() -> Color { get_color(&config().colors.info, Color::Blue) }
-    pub fn dim() -> Color { get_color(&config().colors.dim, Color::DarkGray) }
-    pub fn selected() -> Color { get_color(&config().colors.selected_bg, Color::DarkGray) }
+    pub fn fg() -> Color {
+        get_color(&config().colors.text, Color::Reset)
+    }
+    pub fn fg_bright() -> Color {
+        get_color(&config().colors.text_bright, Color::White)
+    }
+    pub fn green() -> Color {
+        get_color(&config().colors.staged, Color::Green)
+    }
+    pub fn yellow() -> Color {
+        get_color(&config().colors.modified, Color::Yellow)
+    }
+    pub fn red() -> Color {
+        get_color(&config().colors.untracked, Color::Red)
+    }
+    pub fn blue() -> Color {
+        get_color(&config().colors.info, Color::Blue)
+    }
+    pub fn magenta() -> Color {
+        Color::Magenta
+    }
+    pub fn dim() -> Color {
+        get_color(&config().colors.dim, Color::DarkGray)
+    }
+    pub fn selected() -> Color {
+        get_color(&config().colors.selected_bg, Color::DarkGray)
+    }
 }
 
 pub fn ui(frame: &mut Frame, app: &mut App) {
@@ -74,6 +93,7 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
     match app.input_mode {
         InputMode::RemoteUrl => render_remote_dialog(frame, app),
         InputMode::RepoSelect => render_repo_select_dialog(frame, app),
+        InputMode::TagInput => render_tag_dialog(frame, app),
         _ => {}
     }
 }
@@ -180,16 +200,20 @@ fn create_file_item(file: &FileEntry) -> ListItem<'static> {
             Style::default().fg(status_color),
         ),
         Span::styled(file.path.clone(), Style::default().fg(colors::fg())),
-        Span::styled(format!("  {}", diff_str), Style::default().fg(colors::dim())),
+        Span::styled(
+            format!("  {}", diff_str),
+            Style::default().fg(colors::dim()),
+        ),
     ]))
 }
 
 fn render_log_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(area);
 
-    // Branch info with status label
+    // Branch info with status label and unpushed tag count
     let status_label = app.status_label();
-    let branch_info = Paragraph::new(Line::from(vec![
+    let unpushed_tags = app.unpushed_tag_count();
+    let mut branch_spans = vec![
         Span::styled("on ", Style::default().fg(colors::dim())),
         Span::styled(
             app.branch_name.clone(),
@@ -199,8 +223,14 @@ fn render_log_tab(frame: &mut Frame, app: &mut App, area: Rect) {
             format!("  {}", status_label),
             Style::default().fg(colors::yellow()),
         ),
-    ]));
-    frame.render_widget(branch_info, chunks[0]);
+    ];
+    if unpushed_tags > 0 {
+        branch_spans.push(Span::styled(
+            format!("  ● {} tag unpushed", unpushed_tags),
+            Style::default().fg(colors::yellow()),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(branch_spans)), chunks[0]);
 
     let ahead = app.ahead_behind.map(|(a, _)| a).unwrap_or(0);
 
@@ -238,6 +268,18 @@ fn render_log_tab(frame: &mut Frame, app: &mut App, area: Rect) {
                     Style::default().fg(colors::blue()),
                 ));
             }
+            // Tags: pushed=magenta, unpushed=yellow
+            for tag in &commit.tags {
+                let tag_color = if tag.pushed {
+                    colors::magenta()
+                } else {
+                    colors::yellow()
+                };
+                spans.push(Span::styled(
+                    format!(" [{}]", tag.name),
+                    Style::default().fg(tag_color),
+                ));
+            }
 
             // Line 2: graph line + hash + time
             ListItem::new(vec![
@@ -262,6 +304,7 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
         InputMode::Insert => vec![("Enter", "commit"), ("Esc", "cancel")],
         InputMode::RepoSelect => vec![("j/k", "move"), ("Enter", "select"), ("Esc", "cancel")],
         InputMode::RemoteUrl => vec![("Enter", "add"), ("Esc", "cancel")],
+        InputMode::TagInput => vec![("Enter", "save"), ("Esc", "cancel")],
         InputMode::Normal => match app.tab {
             Tab::Files => vec![
                 ("Space", "stage"),
@@ -271,10 +314,11 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
                 ("q", "quit"),
             ],
             Tab::Log => vec![
-                ("j/k", "navigate"),
+                ("t", "tag"),
+                ("T", "push tags"),
+                ("d", "delete tag"),
                 ("P", "push"),
                 ("p", "pull"),
-                ("r", "repo"),
                 ("q", "quit"),
             ],
         },
@@ -388,6 +432,70 @@ fn render_repo_select_dialog(frame: &mut Frame, app: &mut App) {
         .highlight_symbol("> ");
 
     frame.render_stateful_widget(list, inner, &mut app.repo_select_state);
+}
+
+fn render_tag_dialog(frame: &mut Frame, app: &App) {
+    let is_editing = app.editing_tag.is_some();
+    let title = if is_editing {
+        " Edit Tag "
+    } else {
+        " Create Tag "
+    };
+
+    let area = centered_rect(50, 6, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(colors::blue()));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Get commit info
+    let commit_info = app
+        .commits_state
+        .selected()
+        .and_then(|i| app.commits.get(i))
+        .map(|c| format!("on commit: {}", c.id))
+        .unwrap_or_default();
+
+    let warning = if is_editing
+        && app
+            .commits_state
+            .selected()
+            .and_then(|i| app.commits.get(i))
+            .and_then(|c| c.tags.first())
+            .is_some_and(|t| t.pushed)
+    {
+        Some("⚠ Tag already pushed - will update remote")
+    } else {
+        None
+    };
+
+    let mut lines = vec![Line::from(Span::styled(
+        commit_info,
+        Style::default().fg(colors::dim()),
+    ))];
+
+    if let Some(warn) = warning {
+        lines.push(Line::from(Span::styled(
+            warn,
+            Style::default().fg(colors::yellow()),
+        )));
+    }
+
+    lines.push(Line::from(Span::styled(
+        format!("Tag: {}", app.tag_input),
+        Style::default().fg(colors::fg_bright()),
+    )));
+
+    frame.render_widget(Paragraph::new(lines), inner);
+
+    // Cursor position
+    let cursor_y = inner.y + if warning.is_some() { 2 } else { 1 };
+    frame.set_cursor_position((inner.x + 5 + app.tag_input.width() as u16, cursor_y));
 }
 
 pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {

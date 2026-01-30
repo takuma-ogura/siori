@@ -30,6 +30,13 @@ pub enum InputMode {
     Insert,
     RemoteUrl,
     RepoSelect,
+    TagInput,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TagInfo {
+    pub name: String,
+    pub pushed: bool,
 }
 
 #[derive(Clone)]
@@ -51,10 +58,12 @@ pub enum FileStatus {
 #[derive(Clone)]
 pub struct CommitEntry {
     pub id: String,
+    pub full_id: git2::Oid,
     pub message: String,
     pub time: String,
     pub is_head: bool,
     pub remote_branches: Vec<String>,
+    pub tags: Vec<TagInfo>,
 }
 
 pub struct App {
@@ -63,6 +72,8 @@ pub struct App {
     pub input_mode: InputMode,
     pub commit_message: String,
     pub remote_url: String,
+    pub tag_input: String,
+    pub editing_tag: Option<String>, // Some if editing existing tag
     pub files: Vec<FileEntry>,
     /// Index mapping for visual list order (staged files first, then unstaged)
     pub visual_list: Vec<usize>,
@@ -91,6 +102,8 @@ impl App {
             input_mode: InputMode::default(),
             commit_message: String::new(),
             remote_url: String::new(),
+            tag_input: String::new(),
+            editing_tag: None,
             files: Vec::new(),
             visual_list: Vec::new(),
             commits: Vec::new(),
@@ -183,7 +196,8 @@ impl App {
         } else if let Some(idx) = self.files_state.selected()
             && idx >= self.visual_list.len()
         {
-            self.files_state.select(self.visual_list.len().checked_sub(1));
+            self.files_state
+                .select(self.visual_list.len().checked_sub(1));
         }
 
         Ok(())
@@ -238,19 +252,53 @@ impl App {
         let _ = revwalk.set_sorting(git2::Sort::TIME);
         let head_id = self.repo.head().ok().and_then(|h| h.target());
 
+        // Collect remote branch refs
         let mut remote_refs: std::collections::HashMap<git2::Oid, Vec<String>> =
             std::collections::HashMap::new();
+        // Collect local tags
+        let mut local_tags: std::collections::HashMap<git2::Oid, Vec<String>> =
+            std::collections::HashMap::new();
+        // Collect remote tags (to determine pushed status)
+        let mut remote_tags: std::collections::HashSet<String> = std::collections::HashSet::new();
+
         if let Ok(refs) = self.repo.references() {
             for reference in refs.flatten() {
-                if let Some(name) = reference.name()
-                    && name.starts_with("refs/remotes/")
-                    && let Ok(commit) = reference.peel_to_commit()
-                {
-                    let short_name = name.strip_prefix("refs/remotes/").unwrap_or(name);
-                    remote_refs
-                        .entry(commit.id())
-                        .or_default()
-                        .push(short_name.to_string());
+                let Some(name) = reference.name() else {
+                    continue;
+                };
+                if name.starts_with("refs/remotes/") {
+                    if let Ok(commit) = reference.peel_to_commit() {
+                        let short_name = name.strip_prefix("refs/remotes/").unwrap_or(name);
+                        remote_refs
+                            .entry(commit.id())
+                            .or_default()
+                            .push(short_name.to_string());
+                    }
+                } else if name.starts_with("refs/tags/") {
+                    let tag_name = name.strip_prefix("refs/tags/").unwrap_or(name);
+                    if let Ok(obj) = reference.peel(git2::ObjectType::Commit) {
+                        local_tags
+                            .entry(obj.id())
+                            .or_default()
+                            .push(tag_name.to_string());
+                    }
+                }
+            }
+        }
+
+        // Check which tags exist on remote
+        if let Ok(output) = std::process::Command::new("git")
+            .args(["ls-remote", "--tags", "origin"])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if let Some(tag_ref) = line.split('\t').nth(1) {
+                    let tag_name = tag_ref
+                        .strip_prefix("refs/tags/")
+                        .unwrap_or(tag_ref)
+                        .trim_end_matches("^{}");
+                    remote_tags.insert(tag_name.to_string());
                 }
             }
         }
@@ -263,12 +311,27 @@ impl App {
             let Ok(commit) = self.repo.find_commit(oid) else {
                 continue;
             };
+            let tags: Vec<TagInfo> = local_tags
+                .get(&oid)
+                .map(|names| {
+                    names
+                        .iter()
+                        .map(|name| TagInfo {
+                            name: name.clone(),
+                            pushed: remote_tags.contains(name),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
             self.commits.push(CommitEntry {
                 id: format!("{:.7}", oid),
+                full_id: oid,
                 message: commit.summary().unwrap_or("").to_string(),
                 time: format_relative_time(commit.time().seconds()),
                 is_head: Some(oid) == head_id,
                 remote_branches: remote_refs.get(&oid).cloned().unwrap_or_default(),
+                tags,
             });
         }
 
@@ -522,6 +585,154 @@ impl App {
     }
 
     // ========================================================================
+    // Tag operations
+    // ========================================================================
+    fn open_tag_input(&mut self) {
+        let Some(idx) = self.commits_state.selected() else {
+            return;
+        };
+        let Some(commit) = self.commits.get(idx) else {
+            return;
+        };
+        // If commit has a tag, pre-fill for editing
+        if let Some(tag) = commit.tags.first() {
+            self.tag_input = tag.name.clone();
+            self.editing_tag = Some(tag.name.clone());
+        } else {
+            self.tag_input.clear();
+            self.editing_tag = None;
+        }
+        self.input_mode = InputMode::TagInput;
+    }
+
+    fn create_or_update_tag(&mut self) -> Result<()> {
+        let tag_name = self.tag_input.trim().to_string();
+        if tag_name.is_empty() {
+            self.input_mode = InputMode::Normal;
+            self.message = Some(("Tag name is empty".to_string(), true));
+            return Ok(());
+        }
+
+        let Some(idx) = self.commits_state.selected() else {
+            return Ok(());
+        };
+        let Some(commit) = self.commits.get(idx) else {
+            return Ok(());
+        };
+        let commit_id = commit.full_id;
+        let was_pushed = commit.tags.first().is_some_and(|t| t.pushed);
+        let old_tag = self.editing_tag.clone();
+
+        // Delete old tag if editing
+        if let Some(ref old) = old_tag {
+            if old != &tag_name {
+                self.delete_tag_by_name(old, was_pushed)?;
+            }
+        }
+
+        // Create new tag using git command (avoids borrow issues with git2)
+        let output = std::process::Command::new("git")
+            .args(["tag", "-f", &tag_name, &commit_id.to_string()])
+            .output();
+
+        if let Err(e) = output {
+            self.message = Some((format!("Failed to create tag: {e}"), true));
+            self.input_mode = InputMode::Normal;
+            return Ok(());
+        }
+
+        // If old tag was pushed, push new tag too
+        if was_pushed {
+            let push_output = std::process::Command::new("git")
+                .args(["push", "origin", &tag_name])
+                .output();
+            if let Ok(out) = push_output {
+                if !out.status.success() {
+                    let err = String::from_utf8_lossy(&out.stderr);
+                    self.message = Some((format!("Tag created, push failed: {err}"), true));
+                    self.input_mode = InputMode::Normal;
+                    self.refresh_log()?;
+                    return Ok(());
+                }
+            }
+            self.message = Some((format!("Tag updated: {} (pushed)", tag_name), false));
+        } else {
+            self.message = Some((format!("Created tag: {}", tag_name), false));
+        }
+
+        self.tag_input.clear();
+        self.editing_tag = None;
+        self.input_mode = InputMode::Normal;
+        self.refresh_log()?;
+        Ok(())
+    }
+
+    fn delete_tag_by_name(&mut self, tag_name: &str, delete_remote: bool) -> Result<()> {
+        // Delete local tag
+        let _ = std::process::Command::new("git")
+            .args(["tag", "-d", tag_name])
+            .output();
+
+        // Delete remote tag if needed
+        if delete_remote {
+            let _ = std::process::Command::new("git")
+                .args(["push", "origin", &format!(":refs/tags/{tag_name}")])
+                .output();
+        }
+        Ok(())
+    }
+
+    fn delete_selected_tag(&mut self) -> Result<()> {
+        let Some(idx) = self.commits_state.selected() else {
+            return Ok(());
+        };
+        let Some(commit) = self.commits.get(idx) else {
+            return Ok(());
+        };
+        let Some(tag) = commit.tags.first() else {
+            self.message = Some(("No tag on this commit".to_string(), true));
+            return Ok(());
+        };
+        let tag_name = tag.name.clone();
+        let was_pushed = tag.pushed;
+
+        self.delete_tag_by_name(&tag_name, was_pushed)?;
+
+        let msg = if was_pushed {
+            format!("Deleted tag: {tag_name} (local + remote)")
+        } else {
+            format!("Deleted tag: {tag_name}")
+        };
+        self.message = Some((msg, false));
+        self.refresh_log()?;
+        Ok(())
+    }
+
+    fn push_tags(&mut self) -> Result<()> {
+        let output = std::process::Command::new("git")
+            .args(["push", "--tags"])
+            .output()
+            .context("Failed to push tags")?;
+
+        if output.status.success() {
+            self.message = Some(("Tags pushed successfully".to_string(), false));
+        } else {
+            let err = String::from_utf8_lossy(&output.stderr);
+            self.message = Some((format!("Push tags failed: {}", err.trim()), true));
+        }
+        self.refresh_log()?;
+        Ok(())
+    }
+
+    pub fn unpushed_tag_count(&self) -> usize {
+        self.commits
+            .iter()
+            .flat_map(|c| &c.tags)
+            .filter(|t| !t.pushed)
+            .count()
+    }
+
+    // ========================================================================
     // Label helpers
     // ========================================================================
     pub fn status_label(&self) -> String {
@@ -581,6 +792,19 @@ impl App {
                 KeyCode::Char('k') | KeyCode::Up => self.repo_select_prev(),
                 _ => {}
             },
+            InputMode::TagInput => match code {
+                KeyCode::Esc => {
+                    self.input_mode = InputMode::Normal;
+                    self.tag_input.clear();
+                    self.editing_tag = None;
+                }
+                KeyCode::Enter => self.create_or_update_tag()?,
+                KeyCode::Backspace => {
+                    self.tag_input.pop();
+                }
+                KeyCode::Char(c) => self.tag_input.push(c),
+                _ => {}
+            },
             InputMode::Normal => match code {
                 KeyCode::Char('q') => self.running = false,
                 KeyCode::Tab => self.toggle_tab(),
@@ -592,6 +816,9 @@ impl App {
                 }
                 KeyCode::Char('P') => self.push()?,
                 KeyCode::Char('p') if self.tab == Tab::Log => self.pull()?,
+                KeyCode::Char('t') if self.tab == Tab::Log => self.open_tag_input(),
+                KeyCode::Char('T') if self.tab == Tab::Log => self.push_tags()?,
+                KeyCode::Char('d') if self.tab == Tab::Log => self.delete_selected_tag()?,
                 KeyCode::Char('r') => self.open_repo_select(),
                 KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                     self.running = false;
@@ -838,4 +1065,19 @@ mod tests {
         assert_eq!(result.y, 16); // (40 - 7) / 2
     }
 
+    #[test]
+    fn test_tag_info() {
+        let pushed_tag = TagInfo {
+            name: "v1.0.0".to_string(),
+            pushed: true,
+        };
+        let unpushed_tag = TagInfo {
+            name: "v2.0.0".to_string(),
+            pushed: false,
+        };
+        assert_eq!(pushed_tag.name, "v1.0.0");
+        assert!(pushed_tag.pushed);
+        assert_eq!(unpushed_tag.name, "v2.0.0");
+        assert!(!unpushed_tag.pushed);
+    }
 }
