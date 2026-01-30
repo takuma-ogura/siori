@@ -131,7 +131,8 @@ impl App {
     /// Lightweight refresh for auto-refresh (no network calls, no diff stats)
     pub fn refresh_status_only(&mut self) -> Result<()> {
         self.refresh_status_internal(false)?;
-        // Skip branch info refresh - it's expensive due to graph_ahead_behind()
+        self.refresh_branch_info()?;
+        self.refresh_log_local()?;
         Ok(())
     }
 
@@ -286,6 +287,15 @@ impl App {
     }
 
     fn refresh_log(&mut self) -> Result<()> {
+        self.refresh_log_internal(true)
+    }
+
+    /// Lightweight log refresh without network calls (for auto-refresh)
+    fn refresh_log_local(&mut self) -> Result<()> {
+        self.refresh_log_internal(false)
+    }
+
+    fn refresh_log_internal(&mut self, check_remote_tags: bool) -> Result<()> {
         self.commits.clear();
         let Ok(mut revwalk) = self.repo.revwalk() else {
             return Ok(());
@@ -330,19 +340,21 @@ impl App {
             }
         }
 
-        // Check which tags exist on remote
-        if let Ok(output) = std::process::Command::new("git")
-            .args(["ls-remote", "--tags", "origin"])
-            .output()
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                if let Some(tag_ref) = line.split('\t').nth(1) {
-                    let tag_name = tag_ref
-                        .strip_prefix("refs/tags/")
-                        .unwrap_or(tag_ref)
-                        .trim_end_matches("^{}");
-                    remote_tags.insert(tag_name.to_string());
+        // Check which tags exist on remote (only when requested - this is a network call)
+        if check_remote_tags {
+            if let Ok(output) = std::process::Command::new("git")
+                .args(["ls-remote", "--tags", "origin"])
+                .output()
+            {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if let Some(tag_ref) = line.split('\t').nth(1) {
+                        let tag_name = tag_ref
+                            .strip_prefix("refs/tags/")
+                            .unwrap_or(tag_ref)
+                            .trim_end_matches("^{}");
+                        remote_tags.insert(tag_name.to_string());
+                    }
                 }
             }
         }
@@ -362,7 +374,16 @@ impl App {
                         .iter()
                         .map(|name| TagInfo {
                             name: name.clone(),
-                            pushed: remote_tags.contains(name),
+                            pushed: if check_remote_tags {
+                                remote_tags.contains(name)
+                            } else {
+                                // Keep previous pushed status if not checking remote
+                                self.commits
+                                    .iter()
+                                    .find(|c| c.full_id == oid)
+                                    .and_then(|c| c.tags.iter().find(|t| &t.name == name))
+                                    .is_some_and(|t| t.pushed)
+                            },
                         })
                         .collect()
                 })
