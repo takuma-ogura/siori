@@ -19,23 +19,30 @@ fn run() -> Result<()> {
     let mut terminal = ratatui::Terminal::new(ratatui::prelude::CrosstermBackend::new(stdout()))?;
 
     let mut app = app::App::new()?;
+    let mut last_activity = Instant::now();
     let mut last_refresh = Instant::now();
 
     while app.running {
         terminal.draw(|f| ui::ui(f, &mut app))?;
-        if event::poll(Duration::from_millis(100))? {
+
+        // 16ms polling for ~60fps responsiveness
+        if event::poll(Duration::from_millis(16))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     app.handle_key(key.code, key.modifiers)?;
+                    last_activity = Instant::now();
                 }
                 Event::Mouse(mouse) => {
                     app.handle_mouse(mouse)?;
+                    last_activity = Instant::now();
                 }
                 _ => {}
             }
         }
-        // 2秒ごとに自動リフレッシュ（ステータスのみ、ネットワーク呼び出しなし）
-        if last_refresh.elapsed() >= Duration::from_secs(2) {
+
+        // Auto-refresh ONLY when idle (no input for 2+ seconds)
+        let idle_time = last_activity.elapsed();
+        if idle_time >= Duration::from_secs(2) && last_refresh.elapsed() >= Duration::from_secs(3) {
             let _ = app.refresh_status_only();
             last_refresh = Instant::now();
         }
@@ -76,6 +83,7 @@ fn main() {
         println!("  Space      Stage/unstage file");
         println!("  c          Enter commit message");
         println!("  P          Push to remote");
+        println!("  R          Refresh (full reload)");
         println!("  j/k/Up/Down Navigate files");
         println!("  Tab        Switch to Log tab");
         println!("  q          Quit");
@@ -84,6 +92,7 @@ fn main() {
         println!("  j/k/Up/Down Navigate commits");
         println!("  P          Push to remote");
         println!("  p          Pull from remote");
+        println!("  R          Refresh (full reload)");
         println!("  Tab        Switch to Files tab");
         println!("  q          Quit");
         println!();

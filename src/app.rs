@@ -128,20 +128,51 @@ impl App {
         Ok(())
     }
 
-    /// Lightweight refresh for auto-refresh (no network calls)
+    /// Lightweight refresh for auto-refresh (no network calls, no diff stats)
     pub fn refresh_status_only(&mut self) -> Result<()> {
-        self.refresh_status()?;
-        self.refresh_branch_info()?;
+        self.refresh_status_internal(false)?;
+        // Skip branch info refresh - it's expensive due to graph_ahead_behind()
         Ok(())
     }
 
     fn refresh_status(&mut self) -> Result<()> {
+        self.refresh_status_internal(true)
+    }
+
+    fn refresh_status_internal(&mut self, compute_diff_stats: bool) -> Result<()> {
         let mut opts = StatusOptions::new();
         opts.include_untracked(true)
             .recurse_untracked_dirs(true)
             .include_ignored(false);
 
         let statuses = self.repo.statuses(Some(&mut opts))?;
+
+        // Quick check: if file count hasn't changed and we're in quick mode, skip full rebuild
+        if !compute_diff_stats {
+            let new_count = statuses.len();
+            let old_count = self.files.len();
+            if new_count == old_count {
+                // Just check if paths have changed
+                let mut paths_match = true;
+                let mut i = 0;
+                for entry in statuses.iter() {
+                    if i >= self.files.len() {
+                        paths_match = false;
+                        break;
+                    }
+                    let path = entry.path().unwrap_or("");
+                    if self.files[i].path != path {
+                        paths_match = false;
+                        break;
+                    }
+                    i += 1;
+                }
+                if paths_match {
+                    return Ok(()); // No changes, skip rebuild
+                }
+            }
+        }
+
         self.files.clear();
         self.visual_list.clear();
 
@@ -163,7 +194,11 @@ impl App {
                 } else {
                     FileStatus::Modified
                 };
-                let diff_stats = self.get_diff_stats(&path, true);
+                let diff_stats = if compute_diff_stats {
+                    self.get_diff_stats(&path, true)
+                } else {
+                    None
+                };
                 staged_indices.push(self.files.len());
                 self.files.push(FileEntry {
                     path: path.clone(),
@@ -182,7 +217,11 @@ impl App {
                 } else {
                     FileStatus::Modified
                 };
-                let diff_stats = self.get_diff_stats(&path, false);
+                let diff_stats = if compute_diff_stats {
+                    self.get_diff_stats(&path, false)
+                } else {
+                    None
+                };
                 unstaged_indices.push(self.files.len());
                 self.files.push(FileEntry {
                     path,
@@ -872,6 +911,10 @@ impl App {
                 KeyCode::Char('T') if self.tab == Tab::Log => self.push_tags()?,
                 KeyCode::Char('d') if self.tab == Tab::Log => self.delete_selected_tag()?,
                 KeyCode::Char('r') => self.open_repo_select(),
+                KeyCode::Char('R') => {
+                    self.refresh()?;
+                    self.message = Some(("Refreshed".to_string(), false));
+                }
                 KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                     self.running = false;
                 }
