@@ -101,31 +101,36 @@ pub struct CommitEntry {
 /// Result from background git operations
 pub type GitResult = std::result::Result<String, String>;
 
-/// Run a git command and return a GitResult
-fn run_git(args: &[&str], success_msg: &str, error_prefix: &str) -> GitResult {
-    // DEBUG: Log command
-    eprintln!("[DEBUG] Running: git {}", args.join(" "));
-    match std::process::Command::new("git").args(args).output() {
-        Ok(o) if o.status.success() => {
-            eprintln!("[DEBUG] Success: {}", success_msg);
-            Ok(success_msg.to_string())
-        }
+/// Run a git command in the specified repository directory
+fn run_git(repo_path: &std::path::Path, args: &[&str], success_msg: &str, error_prefix: &str) -> GitResult {
+    match std::process::Command::new("git")
+        .current_dir(repo_path)
+        .args(args)
+        .output() {
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
             let stdout = String::from_utf8_lossy(&o.stdout);
-            eprintln!("[DEBUG] Failed - status: {:?}", o.status.code());
-            eprintln!("[DEBUG] stderr: {}", stderr.trim());
-            eprintln!("[DEBUG] stdout: {}", stdout.trim());
-            Err(format!(
-                "{}: {}",
-                error_prefix,
-                stderr.trim()
-            ))
+
+            if o.status.success() {
+                // Check if git actually did something
+                let output_text = stdout.to_string() + &stderr.to_string();
+                if output_text.contains("nothing to commit") || output_text.contains("no changes added") {
+                    return Err(format!("{}: {}", error_prefix, output_text.trim()));
+                }
+                Ok(success_msg.to_string())
+            } else {
+                Err(format!(
+                    "{}: {}",
+                    error_prefix,
+                    if stderr.trim().is_empty() {
+                        stdout.trim()
+                    } else {
+                        stderr.trim()
+                    }
+                ))
+            }
         }
-        Err(e) => {
-            eprintln!("[DEBUG] Command error: {}", e);
-            Err(format!("{}: {}", error_prefix, e))
-        }
+        Err(e) => Err(format!("{}: {}", error_prefix, e)),
     }
 }
 
@@ -163,8 +168,23 @@ pub struct App {
 
 impl App {
     pub fn new() -> Result<Self> {
-        let repo = Repository::discover(".").context("Not a git repository")?;
+        // Prioritize .git in current directory to handle nested repositories correctly
+        // This ensures that when working in a subdirectory with its own .git,
+        // we use that repository instead of a parent repository
+        let current_dir = std::env::current_dir().unwrap_or_default();
+        let git_dir = current_dir.join(".git");
+
+        let repo = if git_dir.exists() {
+            // Use current directory's .git if it exists (handles nested repos)
+            eprintln!("[INFO] Using repository in current directory: {:?}", current_dir);
+            Repository::open(&current_dir).context("Failed to open git repository")?
+        } else {
+            // Fall back to discovering parent repositories
+            eprintln!("[INFO] Discovering repository from current directory...");
+            Repository::discover(".").context("Not a git repository")?
+        };
         let repo_path = repo.workdir().unwrap_or(repo.path()).to_path_buf();
+        eprintln!("[INFO] Repository path: {:?}", repo_path);
         let base_dir = std::env::current_dir().unwrap_or_default();
         let available_repos = detect_repos(&base_dir);
 
@@ -233,23 +253,14 @@ impl App {
     pub fn check_processing(&mut self) -> Result<()> {
         if let Some(rx) = &self.processing_rx {
             if let Ok(result) = rx.try_recv() {
-                eprintln!("[DEBUG] check_processing: Got result");
                 match result {
-                    Ok(msg) => {
-                        eprintln!("[DEBUG] Success message: {}", msg);
-                        self.message = Some((msg, false));
-                    }
-                    Err(msg) => {
-                        eprintln!("[DEBUG] Error message: {}", msg);
-                        self.message = Some((msg, true));
-                    }
+                    Ok(msg) => self.message = Some((msg, false)),
+                    Err(msg) => self.message = Some((msg, true)),
                 }
                 self.processing = Processing::None;
                 self.processing_rx = None;
                 self.processing_handle = None;
-                eprintln!("[DEBUG] About to refresh after processing");
                 self.refresh()?;
-                eprintln!("[DEBUG] Refresh completed, message set to: {:?}", self.message);
             }
         }
         Ok(())
@@ -674,23 +685,22 @@ impl App {
 
     fn commit(&mut self) -> Result<()> {
         let message = self.commit_message.trim().to_string();
-        eprintln!("[DEBUG] commit() called with message: '{}'", message);
         if message.is_empty() {
-            eprintln!("[DEBUG] Empty commit message");
             self.message = Some(("Empty commit message".to_string(), true));
             return Ok(());
         }
 
         let is_amending = self.is_amending;
+        let repo_path = self.repo_path.clone();
         self.commit_message.clear();
         self.cursor_pos = 0;
         self.is_amending = false;
         self.input_mode = InputMode::Normal;
 
-        eprintln!("[DEBUG] Starting commit processing (amending: {})", is_amending);
         if is_amending {
             self.start_processing(Processing::Committing, move || {
                 run_git(
+                    &repo_path,
                     &["commit", "--amend", "-m", &message],
                     "Amended successfully",
                     "Amend failed",
@@ -699,13 +709,13 @@ impl App {
         } else {
             self.start_processing(Processing::Committing, move || {
                 run_git(
+                    &repo_path,
                     &["commit", "-m", &message],
                     "Committed successfully",
                     "Commit failed",
                 )
             });
         }
-        eprintln!("[DEBUG] Commit processing started");
         Ok(())
     }
 
@@ -733,6 +743,7 @@ impl App {
     fn push(&mut self) -> Result<()> {
         // Quick check for remote configuration
         let check = std::process::Command::new("git")
+            .current_dir(&self.repo_path)
             .args(["remote", "get-url", "origin"])
             .output();
 
@@ -747,8 +758,9 @@ impl App {
         }
 
         // Run push in background
-        self.start_processing(Processing::Pushing, || {
-            run_git(&["push"], "Pushed successfully", "Push failed")
+        let repo_path = self.repo_path.clone();
+        self.start_processing(Processing::Pushing, move || {
+            run_git(&repo_path, &["push"], "Pushed successfully", "Push failed")
         });
         Ok(())
     }
@@ -792,8 +804,10 @@ impl App {
     }
 
     fn pull(&mut self) -> Result<()> {
-        self.start_processing(Processing::Pulling, || {
+        let repo_path = self.repo_path.clone();
+        self.start_processing(Processing::Pulling, move || {
             run_git(
+                &repo_path,
                 &["pull", "--no-rebase"],
                 "Pulled successfully",
                 "Pull failed",
@@ -970,8 +984,10 @@ impl App {
     }
 
     fn push_tags(&mut self) -> Result<()> {
-        self.start_processing(Processing::PushingTags, || {
+        let repo_path = self.repo_path.clone();
+        self.start_processing(Processing::PushingTags, move || {
             run_git(
+                &repo_path,
                 &["push", "--tags"],
                 "Tags pushed successfully",
                 "Push tags failed",

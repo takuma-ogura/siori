@@ -361,21 +361,33 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
         InputMode::RemoteUrl => vec![("Enter", "add"), ("Esc", "cancel")],
         InputMode::TagInput => vec![("Enter", "save"), ("Esc", "cancel")],
         InputMode::Normal => match app.tab {
-            Tab::Files => vec![
-                ("Space", "stage"),
-                ("c", "commit"),
-                ("P", "push"),
-                ("R", "refresh"),
-                ("q", "quit"),
-            ],
-            Tab::Log => vec![
-                ("e", "amend"),
-                ("t", "tag"),
-                ("T", "push tags"),
-                ("P", "push"),
-                ("p", "pull"),
-                ("q", "quit"),
-            ],
+            Tab::Files => {
+                let mut hints = vec![
+                    ("Space", "stage"),
+                    ("c", "commit"),
+                    ("P", "push"),
+                ];
+                // Show repo switcher hint if multiple repos detected
+                if app.available_repos.len() > 1 {
+                    hints.push(("r", "repos"));
+                }
+                hints.push(("q", "quit"));
+                hints
+            }
+            Tab::Log => {
+                let mut hints = vec![
+                    ("e", "amend"),
+                    ("t", "tag"),
+                    ("P", "push"),
+                    ("p", "pull"),
+                ];
+                // Show repo switcher hint if multiple repos detected
+                if app.available_repos.len() > 1 {
+                    hints.push(("r", "repos"));
+                }
+                hints.push(("q", "quit"));
+                hints
+            }
         },
     };
 

@@ -103,6 +103,7 @@ fn main() {
         println!("  Space      Stage/unstage file");
         println!("  c          Enter commit message");
         println!("  P          Push to remote");
+        println!("  r          Switch repository (for nested repos)");
         println!("  R          Refresh (full reload)");
         println!("  j/k/Up/Down Navigate files");
         println!("  Tab        Switch to Log tab");
@@ -110,8 +111,13 @@ fn main() {
         println!();
         println!("Keybindings (Log tab):");
         println!("  j/k/Up/Down Navigate commits");
+        println!("  e          Edit commit message (amend HEAD)");
+        println!("  t          Create/edit tag");
+        println!("  T          Push all tags");
+        println!("  d          Delete tag");
         println!("  P          Push to remote");
         println!("  p          Pull from remote");
+        println!("  r          Switch repository (for nested repos)");
         println!("  R          Refresh (full reload)");
         println!("  Tab        Switch to Files tab");
         println!("  q          Quit");
