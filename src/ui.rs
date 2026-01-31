@@ -554,12 +554,20 @@ fn render_tag_dialog(frame: &mut Frame, app: &App) {
 }
 
 fn render_processing_overlay(frame: &mut Frame, app: &App) {
+    use crate::app::Processing;
+
     let area = centered_rect(30, 3, frame.area());
     frame.render_widget(Clear, area);
 
+    // Use green for tag push, blue for other operations
+    let border_color = match app.processing {
+        Processing::PushingTags => colors::green(),
+        _ => colors::blue(),
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(colors::blue()));
+        .border_style(Style::default().fg(border_color));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
