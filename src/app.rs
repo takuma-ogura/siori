@@ -105,7 +105,11 @@ pub type GitResult = std::result::Result<String, String>;
 fn run_git(args: &[&str], success_msg: &str, error_prefix: &str) -> GitResult {
     match std::process::Command::new("git").args(args).output() {
         Ok(o) if o.status.success() => Ok(success_msg.to_string()),
-        Ok(o) => Err(format!("{}: {}", error_prefix, String::from_utf8_lossy(&o.stderr).trim())),
+        Ok(o) => Err(format!(
+            "{}: {}",
+            error_prefix,
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
         Err(e) => Err(format!("{}: {}", error_prefix, e)),
     }
 }
@@ -659,11 +663,19 @@ impl App {
 
         if is_amending {
             self.start_processing(Processing::Committing, move || {
-                run_git(&["commit", "--amend", "-m", &message], "Amended successfully", "Amend failed")
+                run_git(
+                    &["commit", "--amend", "-m", &message],
+                    "Amended successfully",
+                    "Amend failed",
+                )
             });
         } else {
             self.start_processing(Processing::Committing, move || {
-                run_git(&["commit", "-m", &message], "Committed successfully", "Commit failed")
+                run_git(
+                    &["commit", "-m", &message],
+                    "Committed successfully",
+                    "Commit failed",
+                )
             });
         }
         Ok(())
@@ -753,7 +765,11 @@ impl App {
 
     fn pull(&mut self) -> Result<()> {
         self.start_processing(Processing::Pulling, || {
-            run_git(&["pull", "--no-rebase"], "Pulled successfully", "Pull failed")
+            run_git(
+                &["pull", "--no-rebase"],
+                "Pulled successfully",
+                "Pull failed",
+            )
         });
         Ok(())
     }
@@ -927,7 +943,11 @@ impl App {
 
     fn push_tags(&mut self) -> Result<()> {
         self.start_processing(Processing::PushingTags, || {
-            run_git(&["push", "--tags"], "Tags pushed successfully", "Push tags failed")
+            run_git(
+                &["push", "--tags"],
+                "Tags pushed successfully",
+                "Push tags failed",
+            )
         });
         Ok(())
     }

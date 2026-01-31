@@ -105,7 +105,11 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw("   "),
         Span::styled("Log", log_style),
         Span::styled(
-            format!("{:>width$}", format!("@ {}", repo_name), width = (area.width as usize).saturating_sub(15)),
+            format!(
+                "{:>width$}",
+                format!("@ {}", repo_name),
+                width = (area.width as usize).saturating_sub(15)
+            ),
             Style::default().fg(colors::green()),
         ),
     ]);
@@ -124,7 +128,11 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) {
     let underline_line = Line::from(vec![
         Span::styled(underline, Style::default().fg(colors::blue())),
         Span::styled(
-            format!("{:>width$}", branch_info, width = (area.width as usize).saturating_sub(16)),
+            format!(
+                "{:>width$}",
+                branch_info,
+                width = (area.width as usize).saturating_sub(16)
+            ),
             Style::default().fg(colors::dim()),
         ),
     ]);
@@ -163,7 +171,12 @@ fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Build display text for input box
     let inner_width = chunks[1].width.saturating_sub(2) as usize;
-    let input_text = build_input_display(&app.commit_message, app.cursor_pos, inner_width, app.input_mode);
+    let input_text = build_input_display(
+        &app.commit_message,
+        app.cursor_pos,
+        inner_width,
+        app.input_mode,
+    );
 
     let input = Paragraph::new(input_text).style(input_style).block(
         Block::default()
@@ -174,7 +187,11 @@ fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
                 colors::dim()
             }))
             .title(if app.input_mode == InputMode::Insert {
-                if app.is_amending { " [AMEND] " } else { " [INSERT] " }
+                if app.is_amending {
+                    " [AMEND] "
+                } else {
+                    " [INSERT] "
+                }
             } else {
                 " c: commit "
             }),
@@ -191,7 +208,11 @@ fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // Files list (chunk index differs based on INSERT mode)
-    let files_chunk_idx = if app.input_mode == InputMode::Insert { 4 } else { 3 };
+    let files_chunk_idx = if app.input_mode == InputMode::Insert {
+        4
+    } else {
+        3
+    };
     let staged: Vec<_> = app.files.iter().filter(|f| f.staged).collect();
     let unstaged: Vec<_> = app.files.iter().filter(|f| !f.staged).collect();
 
@@ -559,7 +580,12 @@ pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 
 /// Build display text for commit input box.
 /// Scrolls text to keep cursor position visible with ellipsis indicators.
-fn build_input_display(text: &str, cursor_pos: usize, max_width: usize, input_mode: InputMode) -> String {
+fn build_input_display(
+    text: &str,
+    cursor_pos: usize,
+    max_width: usize,
+    input_mode: InputMode,
+) -> String {
     // Show placeholder when empty and not in insert mode
     if text.is_empty() && input_mode != InputMode::Insert {
         return "Commit message...".to_string();
