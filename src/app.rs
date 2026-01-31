@@ -103,14 +103,29 @@ pub type GitResult = std::result::Result<String, String>;
 
 /// Run a git command and return a GitResult
 fn run_git(args: &[&str], success_msg: &str, error_prefix: &str) -> GitResult {
+    // DEBUG: Log command
+    eprintln!("[DEBUG] Running: git {}", args.join(" "));
     match std::process::Command::new("git").args(args).output() {
-        Ok(o) if o.status.success() => Ok(success_msg.to_string()),
-        Ok(o) => Err(format!(
-            "{}: {}",
-            error_prefix,
-            String::from_utf8_lossy(&o.stderr).trim()
-        )),
-        Err(e) => Err(format!("{}: {}", error_prefix, e)),
+        Ok(o) if o.status.success() => {
+            eprintln!("[DEBUG] Success: {}", success_msg);
+            Ok(success_msg.to_string())
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            eprintln!("[DEBUG] Failed - status: {:?}", o.status.code());
+            eprintln!("[DEBUG] stderr: {}", stderr.trim());
+            eprintln!("[DEBUG] stdout: {}", stdout.trim());
+            Err(format!(
+                "{}: {}",
+                error_prefix,
+                stderr.trim()
+            ))
+        }
+        Err(e) => {
+            eprintln!("[DEBUG] Command error: {}", e);
+            Err(format!("{}: {}", error_prefix, e))
+        }
     }
 }
 
@@ -218,14 +233,23 @@ impl App {
     pub fn check_processing(&mut self) -> Result<()> {
         if let Some(rx) = &self.processing_rx {
             if let Ok(result) = rx.try_recv() {
+                eprintln!("[DEBUG] check_processing: Got result");
                 match result {
-                    Ok(msg) => self.message = Some((msg, false)),
-                    Err(msg) => self.message = Some((msg, true)),
+                    Ok(msg) => {
+                        eprintln!("[DEBUG] Success message: {}", msg);
+                        self.message = Some((msg, false));
+                    }
+                    Err(msg) => {
+                        eprintln!("[DEBUG] Error message: {}", msg);
+                        self.message = Some((msg, true));
+                    }
                 }
                 self.processing = Processing::None;
                 self.processing_rx = None;
                 self.processing_handle = None;
+                eprintln!("[DEBUG] About to refresh after processing");
                 self.refresh()?;
+                eprintln!("[DEBUG] Refresh completed, message set to: {:?}", self.message);
             }
         }
         Ok(())
@@ -650,7 +674,9 @@ impl App {
 
     fn commit(&mut self) -> Result<()> {
         let message = self.commit_message.trim().to_string();
+        eprintln!("[DEBUG] commit() called with message: '{}'", message);
         if message.is_empty() {
+            eprintln!("[DEBUG] Empty commit message");
             self.message = Some(("Empty commit message".to_string(), true));
             return Ok(());
         }
@@ -661,6 +687,7 @@ impl App {
         self.is_amending = false;
         self.input_mode = InputMode::Normal;
 
+        eprintln!("[DEBUG] Starting commit processing (amending: {})", is_amending);
         if is_amending {
             self.start_processing(Processing::Committing, move || {
                 run_git(
@@ -678,6 +705,7 @@ impl App {
                 )
             });
         }
+        eprintln!("[DEBUG] Commit processing started");
         Ok(())
     }
 
