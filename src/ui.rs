@@ -2,7 +2,7 @@ use crate::app::{App, FileEntry, FileStatus, HEAD_LABEL, InputMode, Tab, remote_
 use crate::config::{Config, get_color};
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
 use std::sync::OnceLock;
 use unicode_width::UnicodeWidthStr;
@@ -49,44 +49,24 @@ mod colors {
 pub fn ui(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let chunks = Layout::vertical([
-        Constraint::Length(1), // Title + Repo
-        Constraint::Length(3), // Tabs
+        Constraint::Length(2), // Tabs with underline
         Constraint::Min(0),    // Content
         Constraint::Length(3), // Hints
     ])
     .split(area);
 
-    // Title with repo name
-    let base_dir = std::env::current_dir().unwrap_or_default();
-    let repo_display = repo_display_name(&app.repo_path, &base_dir);
-
-    let title = Paragraph::new(Line::from(vec![
-        Span::styled("siori", Style::default().fg(colors::fg_bright()).bold()),
-        Span::styled(" @ ", Style::default().fg(colors::dim())),
-        Span::styled(repo_display, Style::default().fg(colors::green()).bold()),
-    ]));
-    frame.render_widget(title, chunks[0]);
-
-    // Tabs
-    let tabs = Tabs::new(vec!["Files", "Log"])
-        .select(match app.tab {
-            Tab::Files => 0,
-            Tab::Log => 1,
-        })
-        .style(Style::default().fg(colors::dim()))
-        .highlight_style(Style::default().fg(colors::blue()).bold())
-        .divider(" ");
-    frame.render_widget(tabs, chunks[1]);
+    // Tabs with underline
+    render_tabs(frame, app, chunks[0]);
 
     // Content
     match app.tab {
-        Tab::Files => render_files_tab(frame, app, chunks[2]),
-        Tab::Log => render_log_tab(frame, app, chunks[2]),
+        Tab::Files => render_files_tab(frame, app, chunks[1]),
+        Tab::Log => render_log_tab(frame, app, chunks[1]),
     }
 
     // Hints
     if config().ui.show_hints {
-        render_hints(frame, app, chunks[3]);
+        render_hints(frame, app, chunks[2]);
     }
 
     // Dialogs (overlays)
@@ -103,12 +83,71 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
     }
 }
 
+fn render_tabs(frame: &mut Frame, app: &App, area: Rect) {
+    let base_dir = std::env::current_dir().unwrap_or_default();
+    let repo_name = repo_display_name(&app.repo_path, &base_dir);
+
+    // Line 1: Tabs + repo name
+    let is_files = app.tab == Tab::Files;
+    let files_style = if is_files {
+        Style::default().fg(colors::fg_bright()).bold()
+    } else {
+        Style::default().fg(colors::dim())
+    };
+    let log_style = if !is_files {
+        Style::default().fg(colors::fg_bright()).bold()
+    } else {
+        Style::default().fg(colors::dim())
+    };
+
+    let tabs_line = Line::from(vec![
+        Span::styled(" Files", files_style),
+        Span::raw("   "),
+        Span::styled("Log", log_style),
+        Span::styled(
+            format!("{:>width$}", format!("@ {}", repo_name), width = (area.width as usize).saturating_sub(15)),
+            Style::default().fg(colors::green()),
+        ),
+    ]);
+
+    // Line 2: Underline + branch info
+    // " Files" = 6 chars, "   " = 3 chars, "Log" = 3 chars
+    let underline = if is_files { " ━━━━━━" } else { "         ━━━" };
+    let status = app.status_label();
+    let branch_info = format!("on {}  {}", app.branch_name, status);
+
+    let underline_line = Line::from(vec![
+        Span::styled(underline, Style::default().fg(colors::blue())),
+        Span::styled(
+            format!("{:>width$}", branch_info, width = (area.width as usize).saturating_sub(10)),
+            Style::default().fg(colors::dim()),
+        ),
+    ]);
+
+    let paragraph = Paragraph::new(vec![tabs_line, underline_line]);
+    frame.render_widget(paragraph, area);
+}
+
 fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::vertical([
-        Constraint::Length(3), // Commit input
-        Constraint::Min(0),    // Files
-    ])
-    .split(area);
+    // In INSERT mode, add extra line for IME composition
+    let chunks = if app.input_mode == InputMode::Insert {
+        Layout::vertical([
+            Constraint::Length(1), // Spacing
+            Constraint::Length(3), // Commit input
+            Constraint::Length(1), // IME composition line
+            Constraint::Length(1), // Spacing
+            Constraint::Min(0),    // Files
+        ])
+        .split(area)
+    } else {
+        Layout::vertical([
+            Constraint::Length(1), // Spacing
+            Constraint::Length(3), // Commit input
+            Constraint::Length(1), // Spacing
+            Constraint::Min(0),    // Files
+        ])
+        .split(area)
+    };
 
     // Commit input area
     let input_style = if app.input_mode == InputMode::Insert {
@@ -117,11 +156,9 @@ fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         Style::default().fg(colors::dim())
     };
 
-    let input_text = if app.commit_message.is_empty() && app.input_mode != InputMode::Insert {
-        "Commit message...".to_string()
-    } else {
-        app.commit_message.clone()
-    };
+    // Build display text for input box
+    let inner_width = chunks[1].width.saturating_sub(2) as usize;
+    let input_text = build_input_display(&app.commit_message, app.cursor_pos, inner_width, app.input_mode);
 
     let input = Paragraph::new(input_text).style(input_style).block(
         Block::default()
@@ -137,14 +174,24 @@ fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
                 " c: commit "
             }),
     );
-    frame.render_widget(input, chunks[0]);
+    frame.render_widget(input, chunks[1]);
 
     if app.input_mode == InputMode::Insert {
-        let cursor_x = chunks[0].x + app.commit_message.width() as u16 + 1;
-        frame.set_cursor_position((cursor_x, chunks[0].y + 1));
+        // Render IME composition line below the input box
+        // Show a subtle prompt where IME composition will appear
+        let ime_prompt = Paragraph::new(Line::from(vec![
+            Span::styled("  > ", Style::default().fg(colors::dim())),
+        ]));
+        frame.render_widget(ime_prompt, chunks[2]);
+
+        // Position cursor on the IME composition line (after the prompt)
+        // This is where the terminal's IME will render composition text
+        let cursor_x = chunks[2].x + 4; // After "  > "
+        frame.set_cursor_position((cursor_x, chunks[2].y));
     }
 
-    // Files list
+    // Files list (chunk index differs based on INSERT mode)
+    let files_chunk_idx = if app.input_mode == InputMode::Insert { 4 } else { 3 };
     let staged: Vec<_> = app.files.iter().filter(|f| f.staged).collect();
     let unstaged: Vec<_> = app.files.iter().filter(|f| !f.staged).collect();
 
@@ -183,7 +230,7 @@ fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         adjusted_state.select(Some(adjusted_idx));
     }
 
-    frame.render_stateful_widget(list, chunks[1], &mut adjusted_state);
+    frame.render_stateful_widget(list, chunks[files_chunk_idx], &mut adjusted_state);
 }
 
 fn create_file_item(file: &FileEntry) -> ListItem<'static> {
@@ -213,29 +260,11 @@ fn create_file_item(file: &FileEntry) -> ListItem<'static> {
 }
 
 fn render_log_tab(frame: &mut Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(area);
-
-    // Branch info with status label and unpushed tag count
-    let status_label = app.status_label();
-    let unpushed_tags = app.unpushed_tag_count();
-    let mut branch_spans = vec![
-        Span::styled("on ", Style::default().fg(colors::dim())),
-        Span::styled(
-            app.branch_name.clone(),
-            Style::default().fg(colors::green()).bold(),
-        ),
-        Span::styled(
-            format!("  {}", status_label),
-            Style::default().fg(colors::yellow()),
-        ),
-    ];
-    if unpushed_tags > 0 {
-        branch_spans.push(Span::styled(
-            format!("  ● {} tag unpushed", unpushed_tags),
-            Style::default().fg(colors::yellow()),
-        ));
-    }
-    frame.render_widget(Paragraph::new(Line::from(branch_spans)), chunks[0]);
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // Spacing
+        Constraint::Min(0),    // Commits
+    ])
+    .split(area);
 
     let ahead = app.ahead_behind.map(|(a, _)| a).unwrap_or(0);
 
@@ -526,6 +555,74 @@ pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     Rect::new(x, y, width.min(area.width), height.min(area.height))
+}
+
+/// Build display text for commit input box.
+/// Scrolls text to keep cursor position visible with ellipsis indicators.
+fn build_input_display(text: &str, cursor_pos: usize, max_width: usize, input_mode: InputMode) -> String {
+    // Show placeholder when empty and not in insert mode
+    if text.is_empty() && input_mode != InputMode::Insert {
+        return "Commit message...".to_string();
+    }
+
+    let total_width = text.width();
+    if total_width <= max_width {
+        return text.to_string();
+    }
+
+    // Calculate cursor position in display width
+    let cursor_display_pos = text[..cursor_pos].width();
+
+    // Scroll to keep cursor visible (center cursor in view)
+    let half_width = max_width / 2;
+    let scroll_offset = cursor_display_pos.saturating_sub(half_width);
+
+    // Determine ellipsis needs
+    let needs_start_ellipsis = scroll_offset > 0;
+    let needs_end_ellipsis = scroll_offset + max_width < total_width + 1;
+
+    // Available width for actual text (minus ellipsis)
+    let available_width = max_width
+        .saturating_sub(if needs_start_ellipsis { 1 } else { 0 })
+        .saturating_sub(if needs_end_ellipsis { 1 } else { 0 });
+
+    // Extract visible portion
+    let mut result = String::new();
+    let mut current_width = 0;
+    let mut skip_remaining = scroll_offset;
+
+    for ch in text.chars() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+
+        // Skip characters before scroll offset
+        if skip_remaining > 0 {
+            if skip_remaining >= ch_width {
+                skip_remaining -= ch_width;
+                continue;
+            }
+            skip_remaining = 0;
+        }
+
+        // Stop if we've filled the available width
+        if current_width + ch_width > available_width {
+            break;
+        }
+
+        result.push(ch);
+        current_width += ch_width;
+    }
+
+    // Build final string with ellipsis
+    let mut output = String::new();
+    if needs_start_ellipsis {
+        output.push('…');
+    }
+    output.push_str(&result);
+    if needs_end_ellipsis {
+        output.push('…');
+    }
+
+    output
 }
 
 /// Get display name for a repository path relative to base directory

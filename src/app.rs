@@ -101,11 +101,21 @@ pub struct CommitEntry {
 /// Result from background git operations
 pub type GitResult = std::result::Result<String, String>;
 
+/// Run a git command and return a GitResult
+fn run_git(args: &[&str], success_msg: &str, error_prefix: &str) -> GitResult {
+    match std::process::Command::new("git").args(args).output() {
+        Ok(o) if o.status.success() => Ok(success_msg.to_string()),
+        Ok(o) => Err(format!("{}: {}", error_prefix, String::from_utf8_lossy(&o.stderr).trim())),
+        Err(e) => Err(format!("{}: {}", error_prefix, e)),
+    }
+}
+
 pub struct App {
     pub tab: Tab,
     pub running: bool,
     pub input_mode: InputMode,
     pub commit_message: String,
+    pub cursor_pos: usize, // Cursor position in commit_message (byte index)
     pub remote_url: String,
     pub tag_input: String,
     pub editing_tag: Option<String>,
@@ -127,6 +137,8 @@ pub struct App {
     processing_rx: Option<mpsc::Receiver<GitResult>>,
     #[allow(dead_code)]
     processing_handle: Option<JoinHandle<()>>,
+    // Status fingerprint for change detection
+    status_fingerprint: Option<u64>,
 }
 
 impl App {
@@ -141,6 +153,7 @@ impl App {
             running: true,
             input_mode: InputMode::default(),
             commit_message: String::new(),
+            cursor_pos: 0,
             remote_url: String::new(),
             tag_input: String::new(),
             editing_tag: None,
@@ -160,6 +173,7 @@ impl App {
             spinner_frame: 0,
             processing_rx: None,
             processing_handle: None,
+            status_fingerprint: None,
         };
         app.refresh()?;
         Ok(app)
@@ -238,28 +252,13 @@ impl App {
 
         let statuses = self.repo.statuses(Some(&mut opts))?;
 
-        // Quick check: if file count hasn't changed and we're in quick mode, skip full rebuild
+        // Quick check: compute a fingerprint of current status and compare to previous
         if !compute_diff_stats {
-            let new_count = statuses.len();
-            let old_count = self.files.len();
-            if new_count == old_count {
-                // Just check if paths have changed
-                let mut paths_match = true;
-                for (i, entry) in statuses.iter().enumerate() {
-                    if i >= self.files.len() {
-                        paths_match = false;
-                        break;
-                    }
-                    let path = entry.path().unwrap_or("");
-                    if self.files[i].path != path {
-                        paths_match = false;
-                        break;
-                    }
-                }
-                if paths_match {
-                    return Ok(()); // No changes, skip rebuild
-                }
+            let new_fingerprint = Self::compute_status_fingerprint(&statuses);
+            if Some(&new_fingerprint) == self.status_fingerprint.as_ref() {
+                return Ok(()); // No changes, skip rebuild
             }
+            self.status_fingerprint = Some(new_fingerprint);
         }
 
         self.files.clear();
@@ -336,6 +335,22 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Compute a fingerprint of the git status for change detection.
+    /// This captures path + status bits for each file.
+    fn compute_status_fingerprint(statuses: &git2::Statuses) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        for entry in statuses.iter() {
+            if let Some(path) = entry.path() {
+                path.hash(&mut hasher);
+            }
+            entry.status().bits().hash(&mut hasher);
+        }
+        hasher.finish()
     }
 
     fn get_diff_stats(&self, path: &str, staged: bool) -> Option<(usize, usize)> {
@@ -635,18 +650,11 @@ impl App {
         }
 
         self.commit_message.clear();
+        self.cursor_pos = 0;
         self.input_mode = InputMode::Normal;
 
         self.start_processing(Processing::Committing, move || {
-            let output = std::process::Command::new("git")
-                .args(["commit", "-m", &message])
-                .output();
-
-            match output {
-                Ok(o) if o.status.success() => Ok("Committed successfully".to_string()),
-                Ok(o) => Err(format!("Commit failed: {}", String::from_utf8_lossy(&o.stderr).trim())),
-                Err(e) => Err(format!("Commit failed: {}", e)),
-            }
+            run_git(&["commit", "-m", &message], "Committed successfully", "Commit failed")
         });
         Ok(())
     }
@@ -669,15 +677,7 @@ impl App {
 
         // Run push in background
         self.start_processing(Processing::Pushing, || {
-            let output = std::process::Command::new("git")
-                .args(["push"])
-                .output();
-
-            match output {
-                Ok(o) if o.status.success() => Ok("Pushed successfully".to_string()),
-                Ok(o) => Err(format!("Push failed: {}", String::from_utf8_lossy(&o.stderr).trim())),
-                Err(e) => Err(format!("Push failed: {}", e)),
-            }
+            run_git(&["push"], "Pushed successfully", "Push failed")
         });
         Ok(())
     }
@@ -722,15 +722,7 @@ impl App {
 
     fn pull(&mut self) -> Result<()> {
         self.start_processing(Processing::Pulling, || {
-            let output = std::process::Command::new("git")
-                .args(["pull", "--no-rebase"])
-                .output();
-
-            match output {
-                Ok(o) if o.status.success() => Ok("Pulled successfully".to_string()),
-                Ok(o) => Err(format!("Pull failed: {}", String::from_utf8_lossy(&o.stderr).trim())),
-                Err(e) => Err(format!("Pull failed: {}", e)),
-            }
+            run_git(&["pull", "--no-rebase"], "Pulled successfully", "Pull failed")
         });
         Ok(())
     }
@@ -904,15 +896,7 @@ impl App {
 
     fn push_tags(&mut self) -> Result<()> {
         self.start_processing(Processing::PushingTags, || {
-            let output = std::process::Command::new("git")
-                .args(["push", "--tags"])
-                .output();
-
-            match output {
-                Ok(o) if o.status.success() => Ok("Tags pushed successfully".to_string()),
-                Ok(o) => Err(format!("Push tags failed: {}", String::from_utf8_lossy(&o.stderr).trim())),
-                Err(e) => Err(format!("Push tags failed: {}", e)),
-            }
+            run_git(&["push", "--tags"], "Tags pushed successfully", "Push tags failed")
         });
         Ok(())
     }
@@ -950,9 +934,25 @@ impl App {
                 KeyCode::Esc => self.input_mode = InputMode::Normal,
                 KeyCode::Enter => self.commit()?,
                 KeyCode::Backspace => {
-                    self.commit_message.pop();
+                    if self.cursor_pos > 0 {
+                        let prev = self.cursor_prev_char();
+                        self.commit_message.remove(prev);
+                        self.cursor_pos = prev;
+                    }
                 }
-                KeyCode::Char(c) => self.commit_message.push(c),
+                KeyCode::Delete => {
+                    if self.cursor_pos < self.commit_message.len() {
+                        self.commit_message.remove(self.cursor_pos);
+                    }
+                }
+                KeyCode::Left => self.cursor_pos = self.cursor_prev_char(),
+                KeyCode::Right => self.cursor_pos = self.cursor_next_char(),
+                KeyCode::Home => self.cursor_pos = 0,
+                KeyCode::End => self.cursor_pos = self.commit_message.len(),
+                KeyCode::Char(c) => {
+                    self.commit_message.insert(self.cursor_pos, c);
+                    self.cursor_pos += c.len_utf8();
+                }
                 _ => {}
             },
             InputMode::RemoteUrl => match code {
@@ -1025,6 +1025,38 @@ impl App {
         }
         Ok(())
     }
+
+    // ========================================================================
+    // Cursor movement helpers for commit message editing
+    // ========================================================================
+
+    /// Move cursor to the start of the previous character (for Left key / Backspace)
+    fn cursor_prev_char(&self) -> usize {
+        if self.cursor_pos == 0 {
+            return 0;
+        }
+        self.commit_message[..self.cursor_pos]
+            .char_indices()
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    }
+
+    /// Move cursor to the start of the next character (for Right key)
+    fn cursor_next_char(&self) -> usize {
+        if self.cursor_pos >= self.commit_message.len() {
+            return self.commit_message.len();
+        }
+        self.commit_message[self.cursor_pos..]
+            .char_indices()
+            .nth(1)
+            .map(|(i, _)| self.cursor_pos + i)
+            .unwrap_or(self.commit_message.len())
+    }
+
+    // ========================================================================
+    // List navigation helpers
+    // ========================================================================
 
     fn current_list_len(&self) -> usize {
         match self.tab {
