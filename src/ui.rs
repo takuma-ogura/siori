@@ -111,15 +111,20 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) {
     ]);
 
     // Line 2: Underline + branch info
-    // " Files" = 6 chars, "   " = 3 chars, "Log" = 3 chars
-    let underline = if is_files { " ━━━━━━" } else { "         ━━━" };
+    // Fixed width: " Files" = 6 chars, "   " = 3 chars, "Log" = 3 chars = 12 total
+    // Use fixed-width strings so branch info position stays constant
+    let underline = if is_files {
+        " ━━━━━━         " // Files underline + padding (16 chars total)
+    } else {
+        "         ━━━    " // Padding + Log underline + padding (16 chars total)
+    };
     let status = app.status_label();
     let branch_info = format!("on {}  {}", app.branch_name, status);
 
     let underline_line = Line::from(vec![
         Span::styled(underline, Style::default().fg(colors::blue())),
         Span::styled(
-            format!("{:>width$}", branch_info, width = (area.width as usize).saturating_sub(10)),
+            format!("{:>width$}", branch_info, width = (area.width as usize).saturating_sub(16)),
             Style::default().fg(colors::dim()),
         ),
     ]);
@@ -169,7 +174,7 @@ fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
                 colors::dim()
             }))
             .title(if app.input_mode == InputMode::Insert {
-                " [INSERT] "
+                if app.is_amending { " [AMEND] " } else { " [INSERT] " }
             } else {
                 " c: commit "
             }),
@@ -177,17 +182,12 @@ fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(input, chunks[1]);
 
     if app.input_mode == InputMode::Insert {
-        // Render IME composition line below the input box
-        // Show a subtle prompt where IME composition will appear
-        let ime_prompt = Paragraph::new(Line::from(vec![
-            Span::styled("  > ", Style::default().fg(colors::dim())),
-        ]));
+        // Render IME composition line: "  > " prompt for cursor positioning
+        let ime_prompt = Paragraph::new(Span::styled("  > ", Style::default().fg(colors::dim())));
         frame.render_widget(ime_prompt, chunks[2]);
 
-        // Position cursor on the IME composition line (after the prompt)
-        // This is where the terminal's IME will render composition text
-        let cursor_x = chunks[2].x + 4; // After "  > "
-        frame.set_cursor_position((cursor_x, chunks[2].y));
+        // Position cursor after "  > " (this is where IME composition text appears)
+        frame.set_cursor_position((chunks[2].x + 4, chunks[2].y));
     }
 
     // Files list (chunk index differs based on INSERT mode)
@@ -348,11 +348,11 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
                 ("q", "quit"),
             ],
             Tab::Log => vec![
+                ("e", "amend"),
                 ("t", "tag"),
                 ("T", "push tags"),
                 ("P", "push"),
                 ("p", "pull"),
-                ("R", "refresh"),
                 ("q", "quit"),
             ],
         },
@@ -573,13 +573,19 @@ fn build_input_display(text: &str, cursor_pos: usize, max_width: usize, input_mo
     // Calculate cursor position in display width
     let cursor_display_pos = text[..cursor_pos].width();
 
-    // Scroll to keep cursor visible (center cursor in view)
-    let half_width = max_width / 2;
-    let scroll_offset = cursor_display_pos.saturating_sub(half_width);
+    // Determine scroll offset based on cursor position
+    // Goal: use full width of input box, show text ending at right edge when typing at end
+    let scroll_offset = if cursor_display_pos <= max_width.saturating_sub(1) {
+        // Cursor fits without scrolling - show from beginning
+        0
+    } else {
+        // Scroll to show cursor at the right edge (with 1 char margin)
+        cursor_display_pos.saturating_sub(max_width.saturating_sub(2))
+    };
 
     // Determine ellipsis needs
     let needs_start_ellipsis = scroll_offset > 0;
-    let needs_end_ellipsis = scroll_offset + max_width < total_width + 1;
+    let needs_end_ellipsis = scroll_offset + max_width < total_width;
 
     // Available width for actual text (minus ellipsis)
     let available_width = max_width

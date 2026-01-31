@@ -116,6 +116,7 @@ pub struct App {
     pub input_mode: InputMode,
     pub commit_message: String,
     pub cursor_pos: usize, // Cursor position in commit_message (byte index)
+    pub is_amending: bool, // true when editing existing commit message
     pub remote_url: String,
     pub tag_input: String,
     pub editing_tag: Option<String>,
@@ -154,6 +155,7 @@ impl App {
             input_mode: InputMode::default(),
             commit_message: String::new(),
             cursor_pos: 0,
+            is_amending: false,
             remote_url: String::new(),
             tag_input: String::new(),
             editing_tag: None,
@@ -649,13 +651,42 @@ impl App {
             return Ok(());
         }
 
+        let is_amending = self.is_amending;
         self.commit_message.clear();
         self.cursor_pos = 0;
+        self.is_amending = false;
         self.input_mode = InputMode::Normal;
 
-        self.start_processing(Processing::Committing, move || {
-            run_git(&["commit", "-m", &message], "Committed successfully", "Commit failed")
-        });
+        if is_amending {
+            self.start_processing(Processing::Committing, move || {
+                run_git(&["commit", "--amend", "-m", &message], "Amended successfully", "Amend failed")
+            });
+        } else {
+            self.start_processing(Processing::Committing, move || {
+                run_git(&["commit", "-m", &message], "Committed successfully", "Commit failed")
+            });
+        }
+        Ok(())
+    }
+
+    fn start_amend(&mut self) -> Result<()> {
+        // Only allow amending HEAD commit
+        let Some(idx) = self.commits_state.selected() else {
+            return Ok(());
+        };
+        let Some(commit) = self.commits.get(idx) else {
+            return Ok(());
+        };
+        if !commit.is_head {
+            self.message = Some(("Can only amend HEAD commit".to_string(), true));
+            return Ok(());
+        }
+
+        self.commit_message = commit.message.clone();
+        self.cursor_pos = self.commit_message.len();
+        self.is_amending = true;
+        self.input_mode = InputMode::Insert;
+        self.tab = Tab::Files; // Switch to Files tab to show input
         Ok(())
     }
 
@@ -1012,6 +1043,7 @@ impl App {
                 KeyCode::Char('t') if self.tab == Tab::Log => self.open_tag_input(),
                 KeyCode::Char('T') if self.tab == Tab::Log => self.push_tags()?,
                 KeyCode::Char('d') if self.tab == Tab::Log => self.delete_selected_tag()?,
+                KeyCode::Char('e') if self.tab == Tab::Log => self.start_amend()?,
                 KeyCode::Char('r') => self.open_repo_select(),
                 KeyCode::Char('R') => {
                     self.refresh()?;
