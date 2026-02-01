@@ -361,7 +361,7 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
         InputMode::Insert => vec![("Enter", "commit"), ("Esc", "cancel")],
         InputMode::RepoSelect => vec![("j/k", "move"), ("Enter", "select"), ("Esc", "cancel")],
         InputMode::RemoteUrl => vec![("Enter", "add"), ("Esc", "cancel")],
-        InputMode::TagInput => vec![("Enter", "save"), ("Esc", "cancel")],
+        InputMode::TagInput => vec![("Enter", "create tag"), ("Esc", "cancel")],
         InputMode::VersionConfirm => vec![("Enter", "update & tag"), ("Esc", "cancel")],
         InputMode::UncommittedWarning => vec![("Enter", "continue"), ("Esc", "cancel")],
         InputMode::Normal => match app.tab {
@@ -499,9 +499,9 @@ fn render_repo_select_dialog(frame: &mut Frame, app: &mut App) {
 fn render_tag_dialog(frame: &mut Frame, app: &App) {
     let is_editing = app.editing_tag.is_some();
     let title = if is_editing {
-        " Edit Tag "
+        " Edit Version "
     } else {
-        " Create Tag "
+        " New Version "
     };
 
     let area = centered_rect(50, 6, frame.area());
@@ -714,8 +714,10 @@ fn render_version_confirm_dialog(frame: &mut Frame, app: &App) {
     frame.render_widget(block, area);
 
     let mut lines = vec![
-        Line::from(format!("Tag: {}", pending.tag_name)),
-        Line::from(format!("New version: {}", pending.new_version)),
+        Line::from(format!(
+            "Version: {} → Tag: {}",
+            pending.new_version, pending.tag_name
+        )),
         Line::from(""),
         Line::from("Files to update:"),
     ];

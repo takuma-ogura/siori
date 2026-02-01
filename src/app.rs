@@ -914,51 +914,50 @@ impl App {
     }
 
     fn create_or_update_tag(&mut self) -> Result<()> {
-        let tag_name = self.tag_input.trim().to_string();
-        if tag_name.is_empty() {
+        let version_input = self.tag_input.trim().to_string();
+        if version_input.is_empty() {
             self.input_mode = InputMode::Normal;
-            self.message = Some(("Tag name is empty".to_string(), true));
+            self.message = Some(("Version is empty".to_string(), true));
             return Ok(());
         }
 
-        let Some(idx) = self.commits_state.selected() else {
+        // Validate version format
+        if !version::is_valid_version(&version_input) {
+            self.input_mode = InputMode::Normal;
+            self.message = Some(("Invalid version format (e.g., 0.1.6)".to_string(), true));
             return Ok(());
-        };
-        let Some(commit) = self.commits.get(idx) else {
-            return Ok(());
-        };
-        let commit_id = commit.full_id.to_string();
+        }
 
-        // Extract version from tag name
+        // Generate tag name from version using tag_format
         let tag_format = &self.repo_config.version.tag_format;
-        if let Some(new_version) = version::extract_version_from_tag(&tag_name, tag_format) {
-            // Detect version files
-            let files = version::detect_version_files(&self.repo_path, &self.repo_config);
+        let tag_name = version::generate_tag_name(&version_input, tag_format);
 
-            // Check if any file needs update
-            let needs_update = files.iter().any(|f| f.current_version != new_version);
+        // Detect version files
+        let files = version::detect_version_files(&self.repo_path, &self.repo_config);
 
-            if needs_update && !files.is_empty() {
-                // Store pending update and show confirmation
-                self.pending_version_update = Some(PendingVersionUpdate {
-                    tag_name: tag_name.clone(),
-                    new_version,
-                    files,
-                    commit_id,
-                });
+        // Check if any file needs update
+        let needs_update = files.iter().any(|f| f.current_version != version_input);
 
-                if self.repo_config.version.confirm {
-                    self.input_mode = InputMode::VersionConfirm;
-                    return Ok(());
-                } else {
-                    // Auto-confirm: check for uncommitted changes
-                    return self.check_uncommitted_and_update_version();
-                }
+        if needs_update && !files.is_empty() {
+            // Store pending update and show confirmation
+            self.pending_version_update = Some(PendingVersionUpdate {
+                tag_name,
+                new_version: version_input,
+                files,
+                commit_id: "HEAD".to_string(),
+            });
+
+            if self.repo_config.version.confirm {
+                self.input_mode = InputMode::VersionConfirm;
+                return Ok(());
+            } else {
+                // Auto-confirm: check for uncommitted changes
+                return self.check_uncommitted_and_update_version();
             }
         }
 
         // No version update needed, create tag directly
-        self.finish_tag_creation(&tag_name, &commit_id)
+        self.finish_tag_creation(&tag_name, "HEAD")
     }
 
     fn check_uncommitted_and_update_version(&mut self) -> Result<()> {

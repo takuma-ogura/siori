@@ -58,16 +58,16 @@ pub fn detect_version_files(repo_path: &Path, config: &RepoConfig) -> Vec<Versio
     files
 }
 
-/// Extract version from tag name using config format
-pub fn extract_version_from_tag(tag: &str, tag_format: &str) -> Option<String> {
-    // Convert tag_format to regex: "v{version}" -> "^v(.+)$"
-    let pattern = format!(
-        "^{}$",
-        regex::escape(tag_format).replace(r"\{version\}", "(.+)")
-    );
-    let re = Regex::new(&pattern).ok()?;
-    re.captures(tag)
-        .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+/// Generate tag name from version using tag_format
+pub fn generate_tag_name(version: &str, tag_format: &str) -> String {
+    tag_format.replace("{version}", version)
+}
+
+/// Check if input is a valid version format (e.g., 0.1.6, 1.0.0-beta.1)
+pub fn is_valid_version(input: &str) -> bool {
+    Regex::new(r"^\d+\.\d+\.\d+")
+        .map(|re| re.is_match(input))
+        .unwrap_or(false)
 }
 
 /// Update version file content with new version
@@ -150,19 +150,23 @@ version = "0.1.5"
     }
 
     #[test]
-    fn test_extract_version_from_tag() {
+    fn test_generate_tag_name() {
+        assert_eq!(generate_tag_name("0.1.6", "v{version}"), "v0.1.6");
         assert_eq!(
-            extract_version_from_tag("v0.1.5", "v{version}"),
-            Some("0.1.5".to_string())
+            generate_tag_name("1.0.0-beta.1", "v{version}"),
+            "v1.0.0-beta.1"
         );
-        assert_eq!(
-            extract_version_from_tag("0.1.5", "{version}"),
-            Some("0.1.5".to_string())
-        );
-        assert_eq!(
-            extract_version_from_tag("v1.0.0-beta.1", "v{version}"),
-            Some("1.0.0-beta.1".to_string())
-        );
+        assert_eq!(generate_tag_name("0.1.6", "{version}"), "0.1.6");
+    }
+
+    #[test]
+    fn test_is_valid_version() {
+        assert!(is_valid_version("0.1.6"));
+        assert!(is_valid_version("1.0.0-beta.1"));
+        assert!(is_valid_version("10.20.30"));
+        assert!(!is_valid_version("v0.1.6")); // v prefix is invalid
+        assert!(!is_valid_version("abc"));
+        assert!(!is_valid_version(""));
     }
 
     #[test]
