@@ -102,11 +102,17 @@ pub struct CommitEntry {
 pub type GitResult = std::result::Result<String, String>;
 
 /// Run a git command in the specified repository directory
-fn run_git(repo_path: &std::path::Path, args: &[&str], success_msg: &str, error_prefix: &str) -> GitResult {
+fn run_git(
+    repo_path: &std::path::Path,
+    args: &[&str],
+    success_msg: &str,
+    error_prefix: &str,
+) -> GitResult {
     match std::process::Command::new("git")
         .current_dir(repo_path)
         .args(args)
-        .output() {
+        .output()
+    {
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
             let stdout = String::from_utf8_lossy(&o.stdout);
@@ -114,7 +120,9 @@ fn run_git(repo_path: &std::path::Path, args: &[&str], success_msg: &str, error_
             if o.status.success() {
                 // Check if git actually did something
                 let output_text = stdout.to_string() + &stderr.to_string();
-                if output_text.contains("nothing to commit") || output_text.contains("no changes added") {
+                if output_text.contains("nothing to commit")
+                    || output_text.contains("no changes added")
+                {
                     return Err(format!("{}: {}", error_prefix, output_text.trim()));
                 }
                 Ok(success_msg.to_string())
@@ -176,7 +184,10 @@ impl App {
 
         let repo = if git_dir.exists() {
             // Use current directory's .git if it exists (handles nested repos)
-            eprintln!("[INFO] Using repository in current directory: {:?}", current_dir);
+            eprintln!(
+                "[INFO] Using repository in current directory: {:?}",
+                current_dir
+            );
             Repository::open(&current_dir).context("Failed to open git repository")?
         } else {
             // Fall back to discovering parent repositories

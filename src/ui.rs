@@ -362,11 +362,7 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
         InputMode::TagInput => vec![("Enter", "save"), ("Esc", "cancel")],
         InputMode::Normal => match app.tab {
             Tab::Files => {
-                let mut hints = vec![
-                    ("Space", "stage"),
-                    ("c", "commit"),
-                    ("P", "push"),
-                ];
+                let mut hints = vec![("Space", "stage"), ("c", "commit"), ("P", "push")];
                 // Show repo switcher hint if multiple repos detected
                 if app.available_repos.len() > 1 {
                     hints.push(("r", "repos"));
@@ -375,12 +371,7 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
                 hints
             }
             Tab::Log => {
-                let mut hints = vec![
-                    ("e", "amend"),
-                    ("t", "tag"),
-                    ("P", "push"),
-                    ("p", "pull"),
-                ];
+                let mut hints = vec![("e", "amend"), ("t", "tag"), ("P", "push"), ("p", "pull")];
                 // Show repo switcher hint if multiple repos detected
                 if app.available_repos.len() > 1 {
                     hints.push(("r", "repos"));
