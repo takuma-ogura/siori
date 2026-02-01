@@ -119,7 +119,7 @@ fn run_git(
 
             if o.status.success() {
                 // Check if git actually did something
-                let output_text = stdout.to_string() + &stderr.to_string();
+                let output_text = format!("{}{}", stdout, stderr);
                 if output_text.contains("nothing to commit")
                     || output_text.contains("no changes added")
                 {
