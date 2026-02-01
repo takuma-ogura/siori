@@ -74,6 +74,8 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
         InputMode::RemoteUrl => render_remote_dialog(frame, app),
         InputMode::RepoSelect => render_repo_select_dialog(frame, app),
         InputMode::TagInput => render_tag_dialog(frame, app),
+        InputMode::VersionConfirm => render_version_confirm_dialog(frame, app),
+        InputMode::UncommittedWarning => render_uncommitted_warning_dialog(frame, app),
         _ => {}
     }
 
@@ -360,6 +362,8 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
         InputMode::RepoSelect => vec![("j/k", "move"), ("Enter", "select"), ("Esc", "cancel")],
         InputMode::RemoteUrl => vec![("Enter", "add"), ("Esc", "cancel")],
         InputMode::TagInput => vec![("Enter", "save"), ("Esc", "cancel")],
+        InputMode::VersionConfirm => vec![("Enter", "update & tag"), ("Esc", "cancel")],
+        InputMode::UncommittedWarning => vec![("Enter", "continue"), ("Esc", "cancel")],
         InputMode::Normal => match app.tab {
             Tab::Files => {
                 let mut hints = vec![("Space", "stage"), ("c", "commit"), ("P", "push")];
@@ -690,4 +694,59 @@ fn repo_display_name(path: &std::path::Path, base_dir: &std::path::Path) -> Stri
                 .unwrap_or("repo")
                 .to_string()
         })
+}
+
+fn render_version_confirm_dialog(frame: &mut Frame, app: &App) {
+    let Some(pending) = &app.pending_version_update else {
+        return;
+    };
+
+    let height = 6 + pending.files.len() as u16;
+    let area = centered_rect(50, height.min(15), frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Version Update ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(colors::blue()));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines = vec![
+        Line::from(format!("Tag: {}", pending.tag_name)),
+        Line::from(format!("New version: {}", pending.new_version)),
+        Line::from(""),
+        Line::from("Files to update:"),
+    ];
+
+    for file in &pending.files {
+        lines.push(Line::from(format!(
+            "  {} ({} → {})",
+            file.path, file.current_version, pending.new_version
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines).style(Style::default().fg(colors::fg()));
+    frame.render_widget(paragraph, inner);
+}
+
+fn render_uncommitted_warning_dialog(frame: &mut Frame, _app: &App) {
+    let area = centered_rect(45, 5, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Warning ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(colors::yellow()));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let text = "You have uncommitted changes.\nContinue anyway?";
+    let paragraph = Paragraph::new(text)
+        .style(Style::default().fg(colors::yellow()))
+        .alignment(Alignment::Center);
+
+    frame.render_widget(paragraph, inner);
 }

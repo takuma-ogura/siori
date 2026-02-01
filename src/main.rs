@@ -1,6 +1,7 @@
 mod app;
 pub mod config;
 pub mod ui;
+pub mod version;
 
 use anyhow::{Context, Result};
 use crossterm::{

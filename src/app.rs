@@ -6,6 +6,9 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
+use crate::config::RepoConfig;
+use crate::version::{self, VersionFile};
+
 // ============================================================================
 // Constants & Helpers
 // ============================================================================
@@ -63,6 +66,17 @@ pub enum InputMode {
     RemoteUrl,
     RepoSelect,
     TagInput,
+    VersionConfirm,
+    UncommittedWarning,
+}
+
+/// Pending version update information
+#[derive(Clone)]
+pub struct PendingVersionUpdate {
+    pub tag_name: String,
+    pub new_version: String,
+    pub files: Vec<VersionFile>,
+    pub commit_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -172,6 +186,10 @@ pub struct App {
     processing_handle: Option<JoinHandle<()>>,
     // Status fingerprint for change detection
     status_fingerprint: Option<u64>,
+    // Repository-specific config
+    pub repo_config: RepoConfig,
+    // Pending version update (for confirmation dialog)
+    pub pending_version_update: Option<PendingVersionUpdate>,
 }
 
 impl App {
@@ -198,6 +216,7 @@ impl App {
         eprintln!("[INFO] Repository path: {:?}", repo_path);
         let base_dir = std::env::current_dir().unwrap_or_default();
         let available_repos = detect_repos(&base_dir);
+        let repo_config = RepoConfig::load(&repo_path);
 
         let mut app = Self {
             tab: Tab::default(),
@@ -226,6 +245,8 @@ impl App {
             processing_rx: None,
             processing_handle: None,
             status_fingerprint: None,
+            repo_config,
+            pending_version_update: None,
         };
         app.refresh()?;
         Ok(app)
@@ -833,6 +854,7 @@ impl App {
     fn switch_repo(&mut self, path: PathBuf) -> Result<()> {
         self.repo = Repository::open(&path).context("Failed to open repository")?;
         self.repo_path = path.clone();
+        self.repo_config = RepoConfig::load(&path);
         self.input_mode = InputMode::Normal;
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
         self.message = Some((format!("Switched to: {}", name), false));
@@ -905,20 +927,123 @@ impl App {
         let Some(commit) = self.commits.get(idx) else {
             return Ok(());
         };
-        let commit_id = commit.full_id;
-        let was_pushed = commit.tags.first().is_some_and(|t| t.pushed);
+        let commit_id = commit.full_id.to_string();
+
+        // Extract version from tag name
+        let tag_format = &self.repo_config.version.tag_format;
+        if let Some(new_version) = version::extract_version_from_tag(&tag_name, tag_format) {
+            // Detect version files
+            let files = version::detect_version_files(&self.repo_path, &self.repo_config);
+
+            // Check if any file needs update
+            let needs_update = files.iter().any(|f| f.current_version != new_version);
+
+            if needs_update && !files.is_empty() {
+                // Store pending update and show confirmation
+                self.pending_version_update = Some(PendingVersionUpdate {
+                    tag_name: tag_name.clone(),
+                    new_version,
+                    files,
+                    commit_id,
+                });
+
+                if self.repo_config.version.confirm {
+                    self.input_mode = InputMode::VersionConfirm;
+                    return Ok(());
+                } else {
+                    // Auto-confirm: check for uncommitted changes
+                    return self.check_uncommitted_and_update_version();
+                }
+            }
+        }
+
+        // No version update needed, create tag directly
+        self.finish_tag_creation(&tag_name, &commit_id)
+    }
+
+    fn check_uncommitted_and_update_version(&mut self) -> Result<()> {
+        // Check for uncommitted changes
+        let has_uncommitted = !self.files.is_empty();
+        if has_uncommitted {
+            self.input_mode = InputMode::UncommittedWarning;
+            return Ok(());
+        }
+        self.do_version_update_and_tag()
+    }
+
+    fn do_version_update_and_tag(&mut self) -> Result<()> {
+        let Some(pending) = self.pending_version_update.take() else {
+            self.input_mode = InputMode::Normal;
+            return Ok(());
+        };
+
+        // Update version files
+        for file in &pending.files {
+            let file_path = self.repo_path.join(&file.path);
+            if let Ok(content) = std::fs::read_to_string(&file_path) {
+                let updated =
+                    version::update_version_content(&content, &file.pattern, &pending.new_version);
+                if let Err(e) = std::fs::write(&file_path, updated) {
+                    self.message = Some((format!("Failed to update {}: {e}", file.path), true));
+                    self.input_mode = InputMode::Normal;
+                    return Ok(());
+                }
+            }
+        }
+
+        // Stage and commit version changes
+        let file_paths: Vec<&str> = pending.files.iter().map(|f| f.path.as_str()).collect();
+        let _ = std::process::Command::new("git")
+            .current_dir(&self.repo_path)
+            .args(["add"])
+            .args(&file_paths)
+            .output();
+
+        let commit_msg = self
+            .repo_config
+            .version
+            .commit_message
+            .replace("{version}", &pending.new_version);
+        let commit_result = std::process::Command::new("git")
+            .current_dir(&self.repo_path)
+            .args(["commit", "-m", &commit_msg])
+            .output();
+
+        if let Ok(output) = commit_result {
+            if !output.status.success() {
+                let err = String::from_utf8_lossy(&output.stderr);
+                self.message = Some((format!("Version commit failed: {err}"), true));
+                self.input_mode = InputMode::Normal;
+                return Ok(());
+            }
+        }
+
+        // Refresh to get new commit
+        self.refresh()?;
+
+        // Create tag on the new version commit (HEAD)
+        self.finish_tag_creation(&pending.tag_name, "HEAD")
+    }
+
+    fn finish_tag_creation(&mut self, tag_name: &str, commit_ref: &str) -> Result<()> {
+        let was_pushed = self
+            .commits
+            .first()
+            .and_then(|c| c.tags.first())
+            .is_some_and(|t| t.pushed);
         let old_tag = self.editing_tag.clone();
 
         // Delete old tag if editing
         if let Some(ref old) = old_tag {
-            if old != &tag_name {
+            if old != tag_name {
                 self.delete_tag_by_name(old, was_pushed)?;
             }
         }
 
-        // Create new tag using git command (avoids borrow issues with git2)
+        // Create new tag using git command
         let output = std::process::Command::new("git")
-            .args(["tag", "-f", &tag_name, &commit_id.to_string()])
+            .current_dir(&self.repo_path)
+            .args(["tag", "-f", tag_name, commit_ref])
             .output();
 
         if let Err(e) = output {
@@ -930,7 +1055,8 @@ impl App {
         // If old tag was pushed, push new tag too
         if was_pushed {
             let push_output = std::process::Command::new("git")
-                .args(["push", "origin", &tag_name])
+                .current_dir(&self.repo_path)
+                .args(["push", "origin", tag_name])
                 .output();
             if let Ok(out) = push_output {
                 if !out.status.success() {
@@ -1102,6 +1228,24 @@ impl App {
                     self.tag_input.pop();
                 }
                 KeyCode::Char(c) => self.tag_input.push(c),
+                _ => {}
+            },
+            InputMode::VersionConfirm => match code {
+                KeyCode::Esc => {
+                    self.input_mode = InputMode::Normal;
+                    self.pending_version_update = None;
+                    self.tag_input.clear();
+                }
+                KeyCode::Enter => self.check_uncommitted_and_update_version()?,
+                _ => {}
+            },
+            InputMode::UncommittedWarning => match code {
+                KeyCode::Esc => {
+                    self.input_mode = InputMode::Normal;
+                    self.pending_version_update = None;
+                    self.tag_input.clear();
+                }
+                KeyCode::Enter => self.do_version_update_and_tag()?,
                 _ => {}
             },
             InputMode::Normal => match code {

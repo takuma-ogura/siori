@@ -1,13 +1,84 @@
 use ratatui::style::Color;
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+/// Global config (~/.config/siori/config.toml)
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub colors: ColorConfig,
     #[serde(default)]
     pub ui: UiConfig,
+}
+
+/// Repository-specific config (.siori.toml)
+#[derive(Debug, Default, Deserialize)]
+pub struct RepoConfig {
+    #[serde(default)]
+    pub version: VersionConfig,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VersionConfig {
+    /// Show confirmation dialog before updating version (default: true)
+    #[serde(default = "default_true")]
+    pub confirm: bool,
+
+    /// Commit message template (default: "chore: bump version to {version}")
+    #[serde(default = "default_commit_message")]
+    pub commit_message: String,
+
+    /// Tag format (default: "v{version}")
+    #[serde(default = "default_tag_format")]
+    pub tag_format: String,
+
+    /// Additional version files to update
+    #[serde(default)]
+    pub additional_files: Vec<VersionFileConfig>,
+
+    /// Files to ignore from auto-detection
+    #[serde(default)]
+    pub ignore: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct VersionFileConfig {
+    pub path: String,
+    pub pattern: String,
+}
+
+fn default_commit_message() -> String {
+    "chore: bump version to {version}".to_string()
+}
+
+fn default_tag_format() -> String {
+    "v{version}".to_string()
+}
+
+impl Default for VersionConfig {
+    fn default() -> Self {
+        Self {
+            confirm: true,
+            commit_message: default_commit_message(),
+            tag_format: default_tag_format(),
+            additional_files: Vec::new(),
+            ignore: Vec::new(),
+        }
+    }
+}
+
+impl RepoConfig {
+    pub fn load(repo_path: &Path) -> Self {
+        let config_path = repo_path.join(".siori.toml");
+        if config_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&config_path) {
+                if let Ok(config) = toml::from_str(&content) {
+                    return config;
+                }
+            }
+        }
+        RepoConfig::default()
+    }
 }
 
 #[derive(Debug, Deserialize)]
