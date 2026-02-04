@@ -76,6 +76,8 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
         InputMode::TagInput => render_tag_dialog(frame, app),
         InputMode::VersionConfirm => render_version_confirm_dialog(frame, app),
         InputMode::UncommittedWarning => render_uncommitted_warning_dialog(frame, app),
+        InputMode::DiscardConfirm => render_discard_confirm_dialog(frame, app),
+        InputMode::DeleteTagConfirm => render_delete_tag_confirm_dialog(frame, app),
         _ => {}
     }
 
@@ -364,10 +366,22 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
         InputMode::TagInput => vec![("Enter", "create tag"), ("Esc", "cancel")],
         InputMode::VersionConfirm => vec![("Enter", "update & tag"), ("Esc", "cancel")],
         InputMode::UncommittedWarning => vec![("Enter", "continue"), ("Esc", "cancel")],
+        InputMode::DiscardConfirm => vec![("Enter", "discard"), ("Esc", "cancel")],
+        InputMode::DeleteTagConfirm => {
+            vec![
+                ("Enter", "delete all"),
+                ("l", "local only"),
+                ("Esc", "cancel"),
+            ]
+        }
         InputMode::Normal => match app.tab {
             Tab::Files => {
-                let mut hints = vec![("Space", "stage"), ("c", "commit"), ("P", "push")];
-                // Show repo switcher hint if multiple repos detected
+                let mut hints = vec![
+                    ("Space", "stage"),
+                    ("x", "discard"),
+                    ("c", "commit"),
+                    ("P", "push"),
+                ];
                 if app.available_repos.len() > 1 {
                     hints.push(("r", "repos"));
                 }
@@ -375,8 +389,13 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
                 hints
             }
             Tab::Log => {
-                let mut hints = vec![("e", "amend"), ("t", "tag"), ("P", "push"), ("p", "pull")];
-                // Show repo switcher hint if multiple repos detected
+                let mut hints = vec![
+                    ("e", "amend"),
+                    ("t", "tag"),
+                    ("x", "del tag"),
+                    ("P", "push"),
+                    ("p", "pull"),
+                ];
                 if app.available_repos.len() > 1 {
                     hints.push(("r", "repos"));
                 }
@@ -750,5 +769,74 @@ fn render_uncommitted_warning_dialog(frame: &mut Frame, _app: &App) {
         .style(Style::default().fg(colors::yellow()))
         .alignment(Alignment::Center);
 
+    frame.render_widget(paragraph, inner);
+}
+
+fn render_discard_confirm_dialog(frame: &mut Frame, app: &App) {
+    let Some(path) = &app.pending_discard_file else {
+        return;
+    };
+
+    let area = centered_rect(45, 6, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Discard Changes ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(colors::red()));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines = vec![
+        Line::from("Discard changes to:"),
+        Line::from(Span::styled(
+            path.as_str(),
+            Style::default().fg(colors::yellow()),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "This cannot be undone!",
+            Style::default().fg(colors::red()),
+        )),
+    ];
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Center);
+    frame.render_widget(paragraph, inner);
+}
+
+fn render_delete_tag_confirm_dialog(frame: &mut Frame, app: &App) {
+    let Some((tag_name, was_pushed)) = &app.pending_delete_tag else {
+        return;
+    };
+
+    let area = centered_rect(45, 6, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Delete Tag ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(colors::red()));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let hint = if *was_pushed {
+        "Enter: local+remote  l: local only"
+    } else {
+        "Enter: delete local tag"
+    };
+
+    let lines = vec![
+        Line::from("Delete tag:"),
+        Line::from(Span::styled(
+            tag_name.as_str(),
+            Style::default().fg(colors::yellow()),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(hint, Style::default().fg(colors::dim()))),
+    ];
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Center);
     frame.render_widget(paragraph, inner);
 }

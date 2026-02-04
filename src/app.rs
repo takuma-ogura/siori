@@ -68,6 +68,8 @@ pub enum InputMode {
     TagInput,
     VersionConfirm,
     UncommittedWarning,
+    DiscardConfirm,
+    DeleteTagConfirm,
 }
 
 /// Pending version update information
@@ -190,6 +192,10 @@ pub struct App {
     pub repo_config: RepoConfig,
     // Pending version update (for confirmation dialog)
     pub pending_version_update: Option<PendingVersionUpdate>,
+    // Pending discard file (for confirmation dialog)
+    pub pending_discard_file: Option<String>,
+    // Pending delete tag (name, was_pushed)
+    pub pending_delete_tag: Option<(String, bool)>,
 }
 
 impl App {
@@ -247,6 +253,8 @@ impl App {
             status_fingerprint: None,
             repo_config,
             pending_version_update: None,
+            pending_discard_file: None,
+            pending_delete_tag: None,
         };
         app.refresh()?;
         Ok(app)
@@ -1035,7 +1043,7 @@ impl App {
         // Delete old tag if editing
         if let Some(ref old) = old_tag {
             if old != tag_name {
-                self.delete_tag_by_name(old, was_pushed)?;
+                self.delete_tag_by_name(old, was_pushed);
             }
         }
 
@@ -1078,43 +1086,93 @@ impl App {
         Ok(())
     }
 
-    fn delete_tag_by_name(&mut self, tag_name: &str, delete_remote: bool) -> Result<()> {
-        // Delete local tag
-        let _ = std::process::Command::new("git")
-            .args(["tag", "-d", tag_name])
+    // === Discard Changes ===
+
+    fn open_discard_confirm(&mut self) {
+        let Some(idx) = self.files_state.selected() else {
+            return;
+        };
+        let Some(&file_idx) = self.visual_list.get(idx) else {
+            return;
+        };
+        let Some(file) = self.files.get(file_idx) else {
+            return;
+        };
+        if file.staged {
+            self.message = Some(("Unstage file first (Space)".to_string(), true));
+            return;
+        }
+        self.pending_discard_file = Some(file.path.clone());
+        self.input_mode = InputMode::DiscardConfirm;
+    }
+
+    fn discard_changes(&mut self) -> Result<()> {
+        let Some(path) = self.pending_discard_file.take() else {
+            return Ok(());
+        };
+        let output = std::process::Command::new("git")
+            .current_dir(&self.repo_path)
+            .args(["restore", &path])
             .output();
 
-        // Delete remote tag if needed
-        if delete_remote {
-            let _ = std::process::Command::new("git")
-                .args(["push", "origin", &format!(":refs/tags/{tag_name}")])
-                .output();
+        match output {
+            Ok(o) if o.status.success() => {
+                self.message = Some((format!("Discarded: {path}"), false));
+            }
+            _ => {
+                self.message = Some(("Discard failed".to_string(), true));
+            }
         }
+        self.input_mode = InputMode::Normal;
+        self.refresh()?;
         Ok(())
     }
 
-    fn delete_selected_tag(&mut self) -> Result<()> {
+    // === Delete Tag ===
+
+    fn open_delete_tag_confirm(&mut self) {
         let Some(idx) = self.commits_state.selected() else {
-            return Ok(());
+            return;
         };
         let Some(commit) = self.commits.get(idx) else {
-            return Ok(());
+            return;
         };
         let Some(tag) = commit.tags.first() else {
             self.message = Some(("No tag on this commit".to_string(), true));
+            return;
+        };
+        self.pending_delete_tag = Some((tag.name.clone(), tag.pushed));
+        self.input_mode = InputMode::DeleteTagConfirm;
+    }
+
+    fn delete_tag_by_name(&self, tag_name: &str, include_remote: bool) {
+        let _ = std::process::Command::new("git")
+            .current_dir(&self.repo_path)
+            .args(["tag", "-d", tag_name])
+            .output();
+
+        if include_remote {
+            let _ = std::process::Command::new("git")
+                .current_dir(&self.repo_path)
+                .args(["push", "origin", &format!(":refs/tags/{tag_name}")])
+                .output();
+        }
+    }
+
+    fn delete_tag(&mut self, include_remote: bool) -> Result<()> {
+        let Some((tag_name, _)) = self.pending_delete_tag.take() else {
             return Ok(());
         };
-        let tag_name = tag.name.clone();
-        let was_pushed = tag.pushed;
 
-        self.delete_tag_by_name(&tag_name, was_pushed)?;
+        self.delete_tag_by_name(&tag_name, include_remote);
 
-        let msg = if was_pushed {
-            format!("Deleted tag: {tag_name} (local + remote)")
+        let msg = if include_remote {
+            format!("Deleted: {tag_name} (local + remote)")
         } else {
-            format!("Deleted tag: {tag_name}")
+            format!("Deleted: {tag_name} (local)")
         };
         self.message = Some((msg, false));
+        self.input_mode = InputMode::Normal;
         self.refresh_log()?;
         Ok(())
     }
@@ -1247,6 +1305,23 @@ impl App {
                 KeyCode::Enter => self.do_version_update_and_tag()?,
                 _ => {}
             },
+            InputMode::DiscardConfirm => match code {
+                KeyCode::Esc => {
+                    self.input_mode = InputMode::Normal;
+                    self.pending_discard_file = None;
+                }
+                KeyCode::Enter => self.discard_changes()?,
+                _ => {}
+            },
+            InputMode::DeleteTagConfirm => match code {
+                KeyCode::Esc => {
+                    self.input_mode = InputMode::Normal;
+                    self.pending_delete_tag = None;
+                }
+                KeyCode::Enter => self.delete_tag(true)?, // Delete local + remote
+                KeyCode::Char('l') => self.delete_tag(false)?, // Local only
+                _ => {}
+            },
             InputMode::Normal => match code {
                 KeyCode::Char('q') => self.running = false,
                 KeyCode::Tab => self.toggle_tab(),
@@ -1260,7 +1335,8 @@ impl App {
                 KeyCode::Char('p') if self.tab == Tab::Log => self.pull()?,
                 KeyCode::Char('t') if self.tab == Tab::Log => self.open_tag_input(),
                 KeyCode::Char('T') if self.tab == Tab::Log => self.push_tags()?,
-                KeyCode::Char('d') if self.tab == Tab::Log => self.delete_selected_tag()?,
+                KeyCode::Char('x') if self.tab == Tab::Files => self.open_discard_confirm(),
+                KeyCode::Char('x') if self.tab == Tab::Log => self.open_delete_tag_confirm(),
                 KeyCode::Char('e') if self.tab == Tab::Log => self.start_amend()?,
                 KeyCode::Char('r') => self.open_repo_select(),
                 KeyCode::Char('R') => {
