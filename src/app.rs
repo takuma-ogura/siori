@@ -2,9 +2,11 @@ use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use git2::{DiffOptions, Repository, Status, StatusOptions};
 use ratatui::widgets::ListState;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use crate::config::RepoConfig;
 use crate::version::{self, VersionFile};
@@ -196,6 +198,9 @@ pub struct App {
     pub pending_discard_file: Option<String>,
     // Pending delete tag (name, was_pushed)
     pub pending_delete_tag: Option<(String, bool)>,
+    // Remote tags cache (to avoid frequent ls-remote calls)
+    remote_tags_cache: HashSet<String>,
+    remote_tags_last_fetch: Option<Instant>,
 }
 
 impl App {
@@ -255,6 +260,8 @@ impl App {
             pending_version_update: None,
             pending_discard_file: None,
             pending_delete_tag: None,
+            remote_tags_cache: HashSet::new(),
+            remote_tags_last_fetch: None,
         };
         app.refresh()?;
         Ok(app)
@@ -296,6 +303,10 @@ impl App {
                 match result {
                     Ok(msg) => self.message = Some((msg, false)),
                     Err(msg) => self.message = Some((msg, true)),
+                }
+                // Invalidate remote tags cache if tags were pushed
+                if self.processing == Processing::PushingTags {
+                    self.remote_tags_last_fetch = None;
                 }
                 self.processing = Processing::None;
                 self.processing_rx = None;
@@ -483,7 +494,7 @@ impl App {
 
     fn refresh_log_internal(&mut self, check_remote_tags: bool) -> Result<()> {
         // Save previous tag pushed status before clearing
-        let previous_tag_status: std::collections::HashMap<String, bool> = self
+        let previous_tag_status: HashMap<String, bool> = self
             .commits
             .iter()
             .flat_map(|c| c.tags.iter())
@@ -501,13 +512,11 @@ impl App {
         let head_id = self.repo.head().ok().and_then(|h| h.target());
 
         // Collect remote branch refs
-        let mut remote_refs: std::collections::HashMap<git2::Oid, Vec<String>> =
-            std::collections::HashMap::new();
+        let mut remote_refs: HashMap<git2::Oid, Vec<String>> = HashMap::new();
         // Collect local tags
-        let mut local_tags: std::collections::HashMap<git2::Oid, Vec<String>> =
-            std::collections::HashMap::new();
+        let mut local_tags: HashMap<git2::Oid, Vec<String>> = HashMap::new();
         // Collect remote tags (to determine pushed status)
-        let mut remote_tags: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut remote_tags: HashSet<String> = HashSet::new();
 
         if let Ok(refs) = self.repo.references() {
             for reference in refs.flatten() {
@@ -534,23 +543,34 @@ impl App {
             }
         }
 
-        // Check which tags exist on remote (only when requested - this is a network call)
+        // Check which tags exist on remote (use cache to avoid frequent network calls)
         if check_remote_tags {
-            if let Ok(output) = std::process::Command::new("git")
-                .args(["ls-remote", "--tags", "origin"])
-                .output()
-            {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    if let Some(tag_ref) = line.split('\t').nth(1) {
-                        let tag_name = tag_ref
-                            .strip_prefix("refs/tags/")
-                            .unwrap_or(tag_ref)
-                            .trim_end_matches("^{}");
-                        remote_tags.insert(tag_name.to_string());
+            let should_fetch = self
+                .remote_tags_last_fetch
+                .map(|t| t.elapsed().as_secs() > 30)
+                .unwrap_or(true);
+
+            if should_fetch {
+                if let Ok(output) = std::process::Command::new("git")
+                    .current_dir(&self.repo_path)
+                    .args(["ls-remote", "--tags", "origin"])
+                    .output()
+                {
+                    self.remote_tags_cache.clear();
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    for line in stdout.lines() {
+                        if let Some(tag_ref) = line.split('\t').nth(1) {
+                            let tag_name = tag_ref
+                                .strip_prefix("refs/tags/")
+                                .unwrap_or(tag_ref)
+                                .trim_end_matches("^{}");
+                            self.remote_tags_cache.insert(tag_name.to_string());
+                        }
                     }
+                    self.remote_tags_last_fetch = Some(Instant::now());
                 }
             }
+            remote_tags = self.remote_tags_cache.clone();
         }
 
         for (i, oid) in revwalk.enumerate() {
@@ -864,6 +884,9 @@ impl App {
         self.repo_path = path.clone();
         self.repo_config = RepoConfig::load(&path);
         self.input_mode = InputMode::Normal;
+        // Clear remote tags cache for new repo
+        self.remote_tags_cache.clear();
+        self.remote_tags_last_fetch = None;
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
         self.message = Some((format!("Switched to: {}", name), false));
         self.refresh()?;
@@ -1165,6 +1188,11 @@ impl App {
         };
 
         self.delete_tag_by_name(&tag_name, include_remote);
+
+        // Invalidate cache if remote was modified
+        if include_remote {
+            self.remote_tags_last_fetch = None;
+        }
 
         let msg = if include_remote {
             format!("Deleted: {tag_name} (local + remote)")
