@@ -2,12 +2,11 @@
 
 use anyhow::{Context, Result};
 use crossterm::{
+    ExecutableCommand,
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind,
-        MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
     },
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-    ExecutableCommand,
 };
 use ratatui::{
     prelude::*,
@@ -18,8 +17,8 @@ use std::path::Path;
 use std::process::Command;
 
 // High contrast colors for universal design
-const BG_ADDED: Color = Color::Rgb(45, 74, 62);     // Dark green
-const BG_DELETED: Color = Color::Rgb(74, 45, 45);   // Dark red
+const BG_ADDED: Color = Color::Rgb(45, 74, 62); // Dark green
+const BG_DELETED: Color = Color::Rgb(74, 45, 45); // Dark red
 const FG_LINE_NUM: Color = Color::Rgb(106, 106, 106);
 const FG_MARKER_ADD: Color = Color::Rgb(120, 200, 120);
 const FG_MARKER_DEL: Color = Color::Rgb(200, 120, 120);
@@ -256,14 +255,12 @@ fn render(frame: &mut Frame, viewer: &DiffViewer) {
 
     // Scrollbar
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
-    let mut scrollbar_state = ScrollbarState::new(viewer.data.lines.len())
-        .position(viewer.scroll);
+    let mut scrollbar_state = ScrollbarState::new(viewer.data.lines.len()).position(viewer.scroll);
     frame.render_stateful_widget(scrollbar, chunks[1], &mut scrollbar_state);
 
     // Footer
     let footer = " j/k: scroll  n/N: next/prev change  q: quit";
-    let footer_widget =
-        Paragraph::new(footer).style(Style::default().fg(Color::DarkGray));
+    let footer_widget = Paragraph::new(footer).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(footer_widget, chunks[2]);
 }
 
@@ -285,8 +282,7 @@ pub fn run(repo_path: &Path, file_path: &str, staged: bool) -> Result<()> {
 
     // Read file content
     let full_path = repo_path.join(file_path);
-    let file_content = std::fs::read_to_string(&full_path)
-        .unwrap_or_else(|_| String::new());
+    let file_content = std::fs::read_to_string(&full_path).unwrap_or_else(|_| String::new());
 
     let data = parse_diff(file_path, &diff_str, &file_content);
 

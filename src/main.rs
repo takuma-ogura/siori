@@ -237,10 +237,7 @@ fn diff_mode(args: &[String]) -> Result<()> {
         diff_viewer::run(&repo_path, file_path, is_staged)
     } else {
         // Commit mode: show diff for a specific commit
-        let commit_ref = filtered_args
-            .first()
-            .map(|s| s.as_str())
-            .unwrap_or("HEAD");
+        let commit_ref = filtered_args.first().map(|s| s.as_str()).unwrap_or("HEAD");
         diff_viewer::run_commit(&repo_path, commit_ref)
     }
 }
