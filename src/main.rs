@@ -1,5 +1,6 @@
 mod app;
 pub mod config;
+mod diff_viewer;
 pub mod ui;
 pub mod version;
 
@@ -11,6 +12,7 @@ use crossterm::{
 };
 use git2::{Repository, Status, StatusOptions};
 use std::io::stdout;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 fn run() -> Result<()> {
@@ -78,6 +80,15 @@ fn run() -> Result<()> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
+    // Handle "siori diff" subcommand
+    if args.len() >= 2 && args[1] == "diff" {
+        if let Err(e) = diff_mode(&args[2..]) {
+            eprintln!("Error: {:#}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if args.iter().any(|a| a == "--check") {
         match check_mode() {
             Ok(_) => {
@@ -95,12 +106,16 @@ fn main() {
         println!("siori - minimal git TUI");
         println!();
         println!("Usage: siori [OPTIONS]");
+        println!("       siori diff [-C <path>] <commit>              Show diff for commit");
+        println!("       siori diff [-C <path>] --file <path>         Show file diff (unstaged)");
+        println!("       siori diff [-C <path>] --file <path> --staged Show file diff (staged)");
         println!();
         println!("Options:");
         println!("  --check    Run checks without starting TUI");
         println!("  --help     Show this help message");
         println!();
         println!("Keybindings (Files tab):");
+        println!("  Enter      Copy diff command to clipboard");
         println!("  Space      Stage/unstage file");
         println!("  c          Enter commit message");
         println!("  P          Push to remote");
@@ -111,11 +126,12 @@ fn main() {
         println!("  q          Quit");
         println!();
         println!("Keybindings (Log tab):");
+        println!("  Enter      Copy diff command to clipboard");
         println!("  j/k/Up/Down Navigate commits");
         println!("  e          Edit commit message (amend HEAD)");
         println!("  t          Create/edit tag");
         println!("  T          Push all tags");
-        println!("  d          Delete tag");
+        println!("  x          Delete tag");
         println!("  P          Push to remote");
         println!("  p          Pull from remote");
         println!("  r          Switch repository (for nested repos)");
@@ -182,4 +198,49 @@ fn check_mode() -> Result<()> {
     };
     println!("Recent commits: {}", commit_count);
     Ok(())
+}
+
+fn diff_mode(args: &[String]) -> Result<()> {
+    // Parse -C option for repository path
+    let repo_path: PathBuf = if let Some(idx) = args.iter().position(|a| a == "-C") {
+        args.get(idx + 1)
+            .ok_or_else(|| anyhow::anyhow!("Missing path after -C"))?
+            .into()
+    } else {
+        let repo = Repository::discover(".").context("Not a git repository")?;
+        repo.workdir()
+            .ok_or_else(|| anyhow::anyhow!("Not a git working directory"))?
+            .to_path_buf()
+    };
+
+    // Filter out -C and its argument for remaining parsing
+    let filtered_args: Vec<&String> = args
+        .iter()
+        .enumerate()
+        .filter(|(i, a)| {
+            *a != "-C" && args.get(i.wrapping_sub(1)).map(|s| s.as_str()) != Some("-C")
+        })
+        .map(|(_, a)| a)
+        .collect();
+
+    // Parse arguments
+    let is_file_mode = filtered_args.iter().any(|a| *a == "--file");
+    let is_staged = filtered_args.iter().any(|a| *a == "--staged");
+
+    if is_file_mode {
+        // Find file path (argument after --file)
+        let file_idx = filtered_args.iter().position(|a| *a == "--file");
+        let file_path = file_idx
+            .and_then(|i| filtered_args.get(i + 1))
+            .ok_or_else(|| anyhow::anyhow!("Missing file path after --file"))?;
+
+        diff_viewer::run(&repo_path, file_path, is_staged)
+    } else {
+        // Commit mode: show diff for a specific commit
+        let commit_ref = filtered_args
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or("HEAD");
+        diff_viewer::run_commit(&repo_path, commit_ref)
+    }
 }

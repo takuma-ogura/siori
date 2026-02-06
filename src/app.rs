@@ -72,6 +72,7 @@ pub enum InputMode {
     UncommittedWarning,
     DiscardConfirm,
     DeleteTagConfirm,
+    DiffConfirm,
 }
 
 /// Pending version update information
@@ -198,6 +199,8 @@ pub struct App {
     pub pending_discard_file: Option<String>,
     // Pending delete tag (name, was_pushed)
     pub pending_delete_tag: Option<(String, bool)>,
+    // Pending diff command (for copy confirmation)
+    pub pending_diff_command: Option<String>,
     // Remote tags cache (to avoid frequent ls-remote calls)
     remote_tags_cache: HashSet<String>,
     remote_tags_last_fetch: Option<Instant>,
@@ -260,6 +263,7 @@ impl App {
             pending_version_update: None,
             pending_discard_file: None,
             pending_delete_tag: None,
+            pending_diff_command: None,
             remote_tags_cache: HashSet::new(),
             remote_tags_last_fetch: None,
         };
@@ -1226,6 +1230,68 @@ impl App {
             .count()
     }
 
+    // === Diff Command ===
+
+    fn prepare_diff_command(&mut self) {
+        let repo_path = self.repo_path.display();
+        let cmd = match self.tab {
+            Tab::Files => {
+                let Some(idx) = self.files_state.selected() else {
+                    return;
+                };
+                let Some(&file_idx) = self.visual_list.get(idx) else {
+                    return;
+                };
+                let Some(file) = self.files.get(file_idx) else {
+                    return;
+                };
+                let staged_flag = if file.staged { " --staged" } else { "" };
+                format!(
+                    "siori diff -C \"{}\" --file \"{}\"{}",
+                    repo_path, file.path, staged_flag
+                )
+            }
+            Tab::Log => {
+                let Some(idx) = self.commits_state.selected() else {
+                    return;
+                };
+                let Some(commit) = self.commits.get(idx) else {
+                    return;
+                };
+                format!("siori diff -C \"{}\" {}", repo_path, commit.id)
+            }
+        };
+        self.pending_diff_command = Some(cmd);
+    }
+
+    fn copy_diff_command(&mut self) -> Result<()> {
+        if let Some(cmd) = self.pending_diff_command.take() {
+            if let Err(e) = copy_to_clipboard(&cmd) {
+                self.message = Some((format!("Copy failed: {}", e), true));
+            } else {
+                self.message = Some((format!("Copied: {}", cmd), false));
+            }
+        }
+        self.input_mode = InputMode::Normal;
+        Ok(())
+    }
+
+    fn open_diff_confirm(&mut self) -> Result<()> {
+        self.prepare_diff_command();
+        if self.pending_diff_command.is_none() {
+            return Ok(());
+        }
+
+        // Check config for skip_confirm
+        let cfg = crate::config::Config::load();
+        if cfg.diff.skip_confirm {
+            self.copy_diff_command()?;
+        } else {
+            self.input_mode = InputMode::DiffConfirm;
+        }
+        Ok(())
+    }
+
     // ========================================================================
     // Label helpers
     // ========================================================================
@@ -1350,11 +1416,20 @@ impl App {
                 KeyCode::Char('l') => self.delete_tag(false)?, // Local only
                 _ => {}
             },
+            InputMode::DiffConfirm => match code {
+                KeyCode::Esc => {
+                    self.input_mode = InputMode::Normal;
+                    self.pending_diff_command = None;
+                }
+                KeyCode::Enter => self.copy_diff_command()?,
+                _ => {}
+            },
             InputMode::Normal => match code {
                 KeyCode::Char('q') => self.running = false,
                 KeyCode::Tab => self.toggle_tab(),
                 KeyCode::Char('j') | KeyCode::Down => self.select_next(),
                 KeyCode::Char('k') | KeyCode::Up => self.select_prev(),
+                KeyCode::Enter => self.open_diff_confirm()?,
                 KeyCode::Char(' ') if self.tab == Tab::Files => self.stage_selected()?,
                 KeyCode::Char('c') if self.tab == Tab::Files => {
                     self.input_mode = InputMode::Insert;
@@ -1517,6 +1592,55 @@ impl App {
         }
         Ok(())
     }
+}
+
+/// Copy text to clipboard (cross-platform)
+#[allow(clippy::needless_return)]
+fn copy_to_clipboard(text: &str) -> Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut child = Command::new("pbcopy").stdin(Stdio::piped()).spawn()?;
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin.write_all(text.as_bytes())?;
+        }
+        child.wait()?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Try xclip first
+        if let Ok(mut child) = Command::new("xclip")
+            .args(["-selection", "clipboard"])
+            .stdin(Stdio::piped())
+            .spawn()
+        {
+            if let Some(stdin) = child.stdin.as_mut() {
+                stdin.write_all(text.as_bytes())?;
+            }
+            child.wait()?;
+            return Ok(());
+        }
+        // Fallback to xsel
+        if let Ok(mut child) = Command::new("xsel")
+            .args(["--clipboard", "--input"])
+            .stdin(Stdio::piped())
+            .spawn()
+        {
+            if let Some(stdin) = child.stdin.as_mut() {
+                stdin.write_all(text.as_bytes())?;
+            }
+            child.wait()?;
+            return Ok(());
+        }
+        anyhow::bail!("No clipboard tool found (xclip or xsel)");
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    anyhow::bail!("Clipboard not supported on this platform")
 }
 
 /// Normalize full-width ASCII characters to half-width (for Japanese IME support)

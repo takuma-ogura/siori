@@ -78,6 +78,7 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
         InputMode::UncommittedWarning => render_uncommitted_warning_dialog(frame, app),
         InputMode::DiscardConfirm => render_discard_confirm_dialog(frame, app),
         InputMode::DeleteTagConfirm => render_delete_tag_confirm_dialog(frame, app),
+        InputMode::DiffConfirm => render_diff_confirm_dialog(frame, app),
         _ => {}
     }
 
@@ -374,9 +375,11 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
                 ("Esc", "cancel"),
             ]
         }
+        InputMode::DiffConfirm => vec![("Enter", "copy"), ("Esc", "cancel")],
         InputMode::Normal => match app.tab {
             Tab::Files => {
                 let mut hints = vec![
+                    ("⏎", "diff"),
                     ("Space", "stage"),
                     ("x", "discard"),
                     ("c", "commit"),
@@ -390,6 +393,7 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
             }
             Tab::Log => {
                 let mut hints = vec![
+                    ("⏎", "diff"),
                     ("e", "amend"),
                     ("t", "tag"),
                     ("x", "del tag"),
@@ -838,5 +842,39 @@ fn render_delete_tag_confirm_dialog(frame: &mut Frame, app: &App) {
     ];
 
     let paragraph = Paragraph::new(lines).alignment(Alignment::Center);
+    frame.render_widget(paragraph, inner);
+}
+
+fn render_diff_confirm_dialog(frame: &mut Frame, app: &App) {
+    let Some(cmd) = &app.pending_diff_command else {
+        return;
+    };
+
+    let area = centered_rect(60, 5, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Copy Diff Command ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(colors::blue()));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            cmd.as_str(),
+            Style::default().fg(colors::fg_bright()),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Enter", Style::default().fg(colors::blue())),
+            Span::styled(" copy  ", Style::default().fg(colors::dim())),
+            Span::styled("Esc", Style::default().fg(colors::blue())),
+            Span::styled(" cancel", Style::default().fg(colors::dim())),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
 }

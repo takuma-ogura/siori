@@ -9,6 +9,15 @@ pub struct Config {
     pub colors: ColorConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub diff: DiffConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct DiffConfig {
+    /// Skip confirmation popup and copy directly (default: false)
+    #[serde(default)]
+    pub skip_confirm: bool,
 }
 
 /// Repository-specific config (.siori.toml)
