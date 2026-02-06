@@ -949,7 +949,7 @@ impl App {
     }
 
     fn create_or_update_tag(&mut self) -> Result<()> {
-        let version_input = self.tag_input.trim().to_string();
+        let version_input = self.tag_input.trim().strip_prefix('v').unwrap_or(self.tag_input.trim()).to_string();
         if version_input.is_empty() {
             self.input_mode = InputMode::Normal;
             self.message = Some(("Version is empty".to_string(), true));
