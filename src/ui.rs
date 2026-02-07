@@ -208,7 +208,7 @@ fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         let ime_prompt = Paragraph::new(Span::styled("  > ", Style::default().fg(colors::dim())));
         frame.render_widget(ime_prompt, chunks[2]);
 
-        // Position cursor after "  > " (this is where IME composition text appears)
+        // Position cursor at IME line (for Japanese input compatibility)
         frame.set_cursor_position((chunks[2].x + 4, chunks[2].y));
     }
 
@@ -631,6 +631,14 @@ fn build_input_display(
 
     let total_width = text.width();
     if total_width <= max_width {
+        // Insert visual cursor in INSERT mode
+        if input_mode == InputMode::Insert && total_width < max_width {
+            let mut result = String::new();
+            result.push_str(&text[..cursor_pos]);
+            result.push('│');
+            result.push_str(&text[cursor_pos..]);
+            return result;
+        }
         return text.to_string();
     }
 
@@ -690,6 +698,20 @@ fn build_input_display(
     output.push_str(&result);
     if needs_end_ellipsis {
         output.push('…');
+    }
+
+    // Insert visual cursor in INSERT mode
+    if input_mode == InputMode::Insert {
+        let cursor_screen_x = if needs_start_ellipsis {
+            1 + cursor_display_pos.saturating_sub(scroll_offset)
+        } else {
+            cursor_display_pos
+        };
+
+        let mut chars: Vec<char> = output.chars().collect();
+        let insert_pos = cursor_screen_x.min(chars.len());
+        chars.insert(insert_pos, '│');
+        output = chars.into_iter().collect();
     }
 
     output

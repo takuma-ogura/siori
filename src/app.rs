@@ -216,18 +216,12 @@ impl App {
 
         let repo = if git_dir.exists() {
             // Use current directory's .git if it exists (handles nested repos)
-            eprintln!(
-                "[INFO] Using repository in current directory: {:?}",
-                current_dir
-            );
             Repository::open(&current_dir).context("Failed to open git repository")?
         } else {
             // Fall back to discovering parent repositories
-            eprintln!("[INFO] Discovering repository from current directory...");
             Repository::discover(".").context("Not a git repository")?
         };
         let repo_path = repo.workdir().unwrap_or(repo.path()).to_path_buf();
-        eprintln!("[INFO] Repository path: {:?}", repo_path);
         let base_dir = std::env::current_dir().unwrap_or_default();
         let available_repos = detect_repos(&base_dir);
         let repo_config = RepoConfig::load(&repo_path);
