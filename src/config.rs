@@ -10,14 +10,22 @@ pub struct Config {
     #[serde(default)]
     pub ui: UiConfig,
     #[serde(default)]
-    pub diff: DiffConfig,
+    pub editor: EditorConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
-pub struct DiffConfig {
-    /// Skip confirmation popup and copy directly (default: false)
+pub struct EditorConfig {
     #[serde(default)]
-    pub skip_confirm: bool,
+    pub command: Option<String>,
+}
+
+impl EditorConfig {
+    pub fn resolve(&self) -> String {
+        self.command
+            .clone()
+            .or_else(|| std::env::var("EDITOR").ok())
+            .unwrap_or_else(|| "vim".to_string())
+    }
 }
 
 /// Repository-specific config (.siori.toml)

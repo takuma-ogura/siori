@@ -876,7 +876,7 @@ fn render_diff_confirm_dialog(frame: &mut Frame, app: &App) {
     frame.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(" Copy Diff Command ")
+        .title(" Copy Command ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(colors::blue()));
 

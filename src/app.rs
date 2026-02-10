@@ -1229,7 +1229,7 @@ impl App {
             .count()
     }
 
-    // === Diff Command ===
+    // === Diff Command (clipboard copy) ===
 
     fn prepare_diff_command(&mut self) {
         let repo_path = self.repo_path.display();
@@ -1280,16 +1280,11 @@ impl App {
         if self.pending_diff_command.is_none() {
             return Ok(());
         }
-
-        // Check config for skip_confirm
-        let cfg = crate::config::Config::load();
-        if cfg.diff.skip_confirm {
-            self.copy_diff_command()?;
-        } else {
-            self.input_mode = InputMode::DiffConfirm;
-        }
+        self.input_mode = InputMode::DiffConfirm;
         Ok(())
     }
+
+    // === View Diff (direct_open mode) ===
 
     // ========================================================================
     // Label helpers
@@ -1611,7 +1606,6 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
 
     #[cfg(target_os = "linux")]
     {
-        // Try xclip first
         if let Ok(mut child) = Command::new("xclip")
             .args(["-selection", "clipboard"])
             .stdin(Stdio::piped())
@@ -1623,7 +1617,6 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
             child.wait()?;
             return Ok(());
         }
-        // Fallback to xsel
         if let Ok(mut child) = Command::new("xsel")
             .args(["--clipboard", "--input"])
             .stdin(Stdio::piped())

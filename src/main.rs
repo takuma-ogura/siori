@@ -13,6 +13,7 @@ use crossterm::{
 use git2::{Repository, Status, StatusOptions};
 use std::io::stdout;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 fn run() -> Result<()> {
@@ -234,10 +235,80 @@ fn diff_mode(args: &[String]) -> Result<()> {
             .and_then(|i| filtered_args.get(i + 1))
             .ok_or_else(|| anyhow::anyhow!("Missing file path after --file"))?;
 
-        diff_viewer::run(&repo_path, file_path, is_staged)
+        open_editor_diff(&repo_path, file_path, is_staged)
     } else {
         // Commit mode: show diff for a specific commit
         let commit_ref = filtered_args.first().map(|s| s.as_str()).unwrap_or("HEAD");
         diff_viewer::run_commit(&repo_path, commit_ref)
     }
+}
+
+/// Open editor with diff highlights: changed lines shown in green, jump to first change.
+fn open_editor_diff(repo_path: &std::path::Path, file_path: &str, staged: bool) -> Result<()> {
+    let editor_cmd = config::Config::load().editor.resolve();
+    let full_path = repo_path.join(file_path);
+
+    // Parse git diff to find changed line numbers
+    let diff_args = if staged {
+        vec!["diff", "--cached", "-U0", "--", file_path]
+    } else {
+        vec!["diff", "-U0", "--", file_path]
+    };
+    let diff_output = Command::new("git")
+        .current_dir(repo_path)
+        .args(&diff_args)
+        .output();
+
+    let mut added_lines: Vec<usize> = Vec::new();
+    if let Ok(output) = diff_output {
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if line.starts_with("@@") {
+                // @@ -old,count +new,count @@
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 3 {
+                    let new_part = parts[2].trim_start_matches('+');
+                    let mut split = new_part.split(',');
+                    let start: usize = split.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+                    let count: usize = split.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+                    for n in start..start + count {
+                        added_lines.push(n);
+                    }
+                }
+            }
+        }
+    }
+
+    let parts: Vec<&str> = editor_cmd.split_whitespace().collect();
+    let (cmd, extra_args) = parts
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("Empty editor command"))?;
+
+    let mut command = Command::new(cmd);
+    command.args(extra_args);
+
+    // Jump to first changed line
+    if let Some(&first) = added_lines.first() {
+        command.arg(format!("+{}", first));
+    }
+
+    command.arg(&full_path);
+
+    // Highlight changed lines with green background
+    if !added_lines.is_empty() {
+        let pattern = added_lines
+            .iter()
+            .map(|n| format!("\\%{}l", n))
+            .collect::<Vec<_>>()
+            .join("\\|");
+        command.arg("-c").arg(format!(
+            "hi SioriDiff guibg=#2d4a3e ctermbg=22 | match SioriDiff /{}/",
+            pattern
+        ));
+    }
+
+    let status = command.status()?;
+    if !status.success() {
+        anyhow::bail!("Editor exited with status {}", status);
+    }
+    Ok(())
 }
