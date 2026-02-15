@@ -1,4 +1,6 @@
-use crate::app::{App, FileEntry, FileStatus, HEAD_LABEL, InputMode, Tab, remote_label};
+use crate::app::{
+    App, FileEntry, FileStatus, HEAD_LABEL, InputMode, Tab, WorktreeInfo, remote_label,
+};
 use crate::config::{Config, get_color};
 use ratatui::{
     prelude::*,
@@ -41,9 +43,6 @@ mod colors {
     pub fn dim() -> Color {
         get_color(&config().colors.dim, Color::DarkGray)
     }
-    pub fn selected() -> Color {
-        get_color(&config().colors.selected_bg, Color::DarkGray)
-    }
 }
 
 pub fn ui(frame: &mut Frame, app: &mut App) {
@@ -79,6 +78,10 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
         InputMode::DiscardConfirm => render_discard_confirm_dialog(frame, app),
         InputMode::DeleteTagConfirm => render_delete_tag_confirm_dialog(frame, app),
         InputMode::DiffConfirm => render_diff_confirm_dialog(frame, app),
+        InputMode::WorktreeTypeSelect => render_worktree_type_dialog(frame, app),
+        InputMode::WorktreeNewBranch => render_worktree_new_branch_dialog(frame, app),
+        InputMode::WorktreeExistingBranch => render_worktree_existing_branch_dialog(frame, app),
+        InputMode::WorktreeRemoveConfirm => render_worktree_remove_dialog(frame, app),
         _ => {}
     }
 
@@ -246,7 +249,7 @@ fn render_files_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let list = List::new(items)
-        .highlight_style(Style::default().bg(colors::selected()))
+        .highlight_style(Style::default().bg(Color::Gray).fg(Color::Rgb(0, 0, 0)))
         .highlight_symbol("> ");
 
     let mut adjusted_state = app.files_state.clone();
@@ -353,7 +356,7 @@ fn render_log_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
 
     let list = List::new(items)
-        .highlight_style(Style::default().bg(colors::selected()))
+        .highlight_style(Style::default().bg(Color::Gray).fg(Color::Rgb(0, 0, 0)))
         .highlight_symbol("> ");
 
     frame.render_stateful_widget(list, chunks[1], &mut app.commits_state);
@@ -362,7 +365,12 @@ fn render_log_tab(frame: &mut Frame, app: &mut App, area: Rect) {
 fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
     let hints = match app.input_mode {
         InputMode::Insert => vec![("Enter", "commit"), ("Esc", "cancel")],
-        InputMode::RepoSelect => vec![("j/k", "move"), ("Enter", "select"), ("Esc", "cancel")],
+        InputMode::RepoSelect => vec![
+            ("j/k", "move"),
+            ("Enter", "select"),
+            ("a", "add"),
+            ("Esc", "cancel"),
+        ],
         InputMode::RemoteUrl => vec![("Enter", "add"), ("Esc", "cancel")],
         InputMode::TagInput => vec![("Enter", "create tag"), ("Esc", "cancel")],
         InputMode::VersionConfirm => vec![("Enter", "update & tag"), ("Esc", "cancel")],
@@ -376,6 +384,19 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
             ]
         }
         InputMode::DiffConfirm => vec![("Enter", "copy"), ("Esc", "cancel")],
+        InputMode::WorktreeTypeSelect => {
+            vec![("j/k", "move"), ("Enter", "select"), ("Esc", "back")]
+        }
+        InputMode::WorktreeNewBranch => {
+            vec![("Tab", "next field"), ("Enter", "create"), ("Esc", "back")]
+        }
+        InputMode::WorktreeExistingBranch => vec![
+            ("j/k", "select"),
+            ("Tab", "edit path"),
+            ("Enter", "create"),
+            ("Esc", "back"),
+        ],
+        InputMode::WorktreeRemoveConfirm => vec![("y", "remove"), ("Esc", "cancel")],
         InputMode::Normal => match app.tab {
             Tab::Files => {
                 let mut hints = vec![
@@ -481,7 +502,16 @@ fn render_remote_dialog(frame: &mut Frame, app: &App) {
 
 fn render_repo_select_dialog(frame: &mut Frame, app: &mut App) {
     let base_dir = std::env::current_dir().unwrap_or_default();
-    let height = (app.available_repos.len() + 2).min(15) as u16;
+    let show_worktrees = app.available_worktrees.len() >= 2;
+    let wt_count = if show_worktrees {
+        app.available_worktrees.len()
+    } else {
+        0
+    };
+    let total_items = wt_count + app.available_repos.len();
+    // Extra lines for section headers
+    let header_lines = if show_worktrees { 3 } else { 0 }; // "WORKTREES" + spacer + "REPOS"
+    let height = (total_items + header_lines + 3).min(20) as u16;
     let area = centered_rect(50, height, frame.area());
     frame.render_widget(Clear, area);
 
@@ -493,30 +523,110 @@ fn render_repo_select_dialog(frame: &mut Frame, app: &mut App) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let items: Vec<ListItem> = app
-        .available_repos
-        .iter()
-        .map(|path| {
-            let name = repo_display_name(path, &base_dir);
-            let is_current = path == &app.repo_path;
-            let color = if is_current {
-                colors::green()
+    // Split inner area: list + hint line
+    let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
+
+    let mut items: Vec<ListItem> = Vec::new();
+
+    if show_worktrees {
+        // WORKTREES section header (non-selectable, rendered inline)
+        items.push(ListItem::new(Line::from(Span::styled(
+            "WORKTREES",
+            Style::default().fg(colors::dim()).bold(),
+        ))));
+        for wt in &app.available_worktrees {
+            items.push(create_worktree_item(wt));
+        }
+        // Spacer + REPOS section header
+        items.push(ListItem::new(Line::from("")));
+        items.push(ListItem::new(Line::from(Span::styled(
+            "REPOS",
+            Style::default().fg(colors::dim()).bold(),
+        ))));
+    }
+
+    for path in &app.available_repos {
+        let name = repo_display_name(path, &base_dir);
+        let is_current = path == &app.repo_path;
+        let color = if is_current {
+            colors::green()
+        } else {
+            colors::fg()
+        };
+        let suffix = if is_current { " (current)" } else { "" };
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(name, Style::default().fg(color)),
+            Span::styled(suffix, Style::default().fg(colors::dim())),
+        ])));
+    }
+
+    // Adjust selection index to account for section headers
+    let mut adjusted_state = app.repo_select_state.clone();
+    if let Some(idx) = app.repo_select_state.selected() {
+        let adjusted = if show_worktrees {
+            if idx < wt_count {
+                idx + 1 // Skip WORKTREES header
             } else {
-                colors::fg()
-            };
-            let suffix = if is_current { " (current)" } else { "" };
-            ListItem::new(Line::from(vec![
-                Span::styled(name, Style::default().fg(color)),
-                Span::styled(suffix, Style::default().fg(colors::dim())),
-            ]))
-        })
-        .collect();
+                idx + 3 // Skip WORKTREES header + spacer + REPOS header
+            }
+        } else {
+            idx
+        };
+        adjusted_state.select(Some(adjusted));
+    }
 
     let list = List::new(items)
-        .highlight_style(Style::default().bg(colors::selected()))
+        .highlight_style(Style::default().bg(Color::Gray).fg(Color::Rgb(0, 0, 0)))
         .highlight_symbol("> ");
 
-    frame.render_stateful_widget(list, inner, &mut app.repo_select_state);
+    frame.render_stateful_widget(list, chunks[0], &mut adjusted_state);
+
+    // Hint line
+    let hint_spans = if show_worktrees {
+        vec![
+            Span::styled("Enter", Style::default().fg(colors::blue())),
+            Span::styled(":switch  ", Style::default().fg(colors::dim())),
+            Span::styled("a", Style::default().fg(colors::blue())),
+            Span::styled(":add  ", Style::default().fg(colors::dim())),
+            Span::styled("x", Style::default().fg(colors::blue())),
+            Span::styled(":remove  ", Style::default().fg(colors::dim())),
+            Span::styled("Esc", Style::default().fg(colors::blue())),
+            Span::styled(":close", Style::default().fg(colors::dim())),
+        ]
+    } else {
+        vec![
+            Span::styled("Enter", Style::default().fg(colors::blue())),
+            Span::styled(":switch  ", Style::default().fg(colors::dim())),
+            Span::styled("a", Style::default().fg(colors::blue())),
+            Span::styled(":add worktree  ", Style::default().fg(colors::dim())),
+            Span::styled("Esc", Style::default().fg(colors::blue())),
+            Span::styled(":close", Style::default().fg(colors::dim())),
+        ]
+    };
+    frame.render_widget(Paragraph::new(Line::from(hint_spans)), chunks[1]);
+}
+
+fn create_worktree_item(wt: &WorktreeInfo) -> ListItem<'static> {
+    let name = wt
+        .path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("?")
+        .to_string();
+    let branch_label = format!(" [{}]", wt.branch);
+    let color = if wt.is_current {
+        colors::green()
+    } else {
+        colors::fg()
+    };
+    let mut spans = vec![
+        Span::styled(name, Style::default().fg(color)),
+        Span::styled(branch_label, Style::default().fg(colors::dim())),
+    ];
+    if wt.is_current {
+        spans.push(Span::styled(" ●", Style::default().fg(colors::green())));
+    }
+    ListItem::new(Line::from(spans))
 }
 
 fn render_tag_dialog(frame: &mut Frame, app: &App) {
@@ -865,6 +975,206 @@ fn render_delete_tag_confirm_dialog(frame: &mut Frame, app: &App) {
 
     let paragraph = Paragraph::new(lines).alignment(Alignment::Center);
     frame.render_widget(paragraph, inner);
+}
+
+fn render_worktree_type_dialog(frame: &mut Frame, app: &App) {
+    let area = centered_rect(45, 7, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" New Worktree ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(colors::blue()));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let new_style = if app.worktree_type_new {
+        Style::default().fg(colors::fg_bright()).bold()
+    } else {
+        Style::default().fg(colors::dim())
+    };
+    let existing_style = if !app.worktree_type_new {
+        Style::default().fg(colors::fg_bright()).bold()
+    } else {
+        Style::default().fg(colors::dim())
+    };
+
+    let new_marker = if app.worktree_type_new { "> " } else { "  " };
+    let existing_marker = if !app.worktree_type_new { "> " } else { "  " };
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(new_marker, new_style),
+            Span::styled("New branch", new_style),
+        ]),
+        Line::from(vec![
+            Span::styled(existing_marker, existing_style),
+            Span::styled("Existing branch", existing_style),
+        ]),
+    ];
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_worktree_new_branch_dialog(frame: &mut Frame, app: &App) {
+    let area = centered_rect(50, 9, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" New Worktree - New Branch ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(colors::blue()));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let field_style = |idx: usize| {
+        if app.worktree_field_index == idx {
+            Style::default().fg(colors::fg_bright())
+        } else {
+            Style::default().fg(colors::dim())
+        }
+    };
+    let label_style = Style::default().fg(colors::dim());
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Branch: ", label_style),
+            Span::styled(&app.worktree_branch_input, field_style(0)),
+            if app.worktree_field_index == 0 {
+                Span::styled("█", field_style(0))
+            } else {
+                Span::raw("")
+            },
+        ]),
+        Line::from(vec![
+            Span::styled("Base:   ", label_style),
+            Span::styled(&app.worktree_base_branch, field_style(1)),
+            if app.worktree_field_index == 1 {
+                Span::styled("█", field_style(1))
+            } else {
+                Span::raw("")
+            },
+        ]),
+        Line::from(vec![
+            Span::styled("Path:   ", label_style),
+            Span::styled(&app.worktree_path_input, field_style(2)),
+            if app.worktree_field_index == 2 {
+                Span::styled("█", field_style(2))
+            } else {
+                Span::raw("")
+            },
+        ]),
+    ];
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_worktree_existing_branch_dialog(frame: &mut Frame, app: &mut App) {
+    let height = (app.worktree_branches.len() + 5).min(15) as u16;
+    let area = centered_rect(50, height, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" New Worktree - Existing Branch ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(colors::blue()));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let chunks = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1), // Path line
+        Constraint::Length(1), // Spacing
+    ])
+    .split(inner);
+
+    let items: Vec<ListItem> = app
+        .worktree_branches
+        .iter()
+        .map(|b| {
+            ListItem::new(Line::from(Span::styled(
+                b.clone(),
+                Style::default().fg(colors::fg()),
+            )))
+        })
+        .collect();
+
+    let list_style = if app.worktree_field_index == 0 {
+        Style::default().bg(Color::Gray).fg(Color::Rgb(0, 0, 0))
+    } else {
+        Style::default().bg(Color::Gray).fg(colors::dim())
+    };
+
+    let list = List::new(items)
+        .highlight_style(list_style)
+        .highlight_symbol("> ");
+
+    frame.render_stateful_widget(list, chunks[0], &mut app.worktree_branch_state);
+
+    // Path line
+    let path_style = if app.worktree_field_index == 1 {
+        Style::default().fg(colors::fg_bright())
+    } else {
+        Style::default().fg(colors::dim())
+    };
+    let cursor = if app.worktree_field_index == 1 {
+        "█"
+    } else {
+        ""
+    };
+    let path_line = Line::from(vec![
+        Span::styled("Path: ", Style::default().fg(colors::dim())),
+        Span::styled(&app.worktree_path_input, path_style),
+        Span::styled(cursor, path_style),
+    ]);
+    frame.render_widget(Paragraph::new(path_line), chunks[1]);
+}
+
+fn render_worktree_remove_dialog(frame: &mut Frame, app: &App) {
+    let Some(wt) = &app.pending_remove_worktree else {
+        return;
+    };
+
+    let area = centered_rect(50, 7, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Remove Worktree? ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(colors::red()));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let name = wt.path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(name, Style::default().fg(colors::yellow())),
+            Span::styled(
+                format!(" [{}]", wt.branch),
+                Style::default().fg(colors::dim()),
+            ),
+        ]),
+        Line::from(Span::styled(
+            wt.path.display().to_string(),
+            Style::default().fg(colors::dim()),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("y", Style::default().fg(colors::red())),
+            Span::styled(":remove  ", Style::default().fg(colors::dim())),
+            Span::styled("Esc", Style::default().fg(colors::blue())),
+            Span::styled(":cancel", Style::default().fg(colors::dim())),
+        ]),
+    ];
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_diff_confirm_dialog(frame: &mut Frame, app: &App) {

@@ -73,6 +73,10 @@ pub enum InputMode {
     DiscardConfirm,
     DeleteTagConfirm,
     DiffConfirm,
+    WorktreeTypeSelect,
+    WorktreeNewBranch,
+    WorktreeExistingBranch,
+    WorktreeRemoveConfirm,
 }
 
 /// Pending version update information
@@ -204,6 +208,17 @@ pub struct App {
     // Remote tags cache (to avoid frequent ls-remote calls)
     remote_tags_cache: HashSet<String>,
     remote_tags_last_fetch: Option<Instant>,
+    // Worktree state
+    pub available_worktrees: Vec<WorktreeInfo>,
+    pub worktree_type_new: bool,
+    pub worktree_branch_input: String,
+    pub worktree_base_branch: String,
+    pub worktree_path_input: String,
+    pub worktree_field_index: usize,
+    pub worktree_branches: Vec<String>,
+    pub worktree_branch_state: ListState,
+    pub pending_remove_worktree: Option<WorktreeInfo>,
+    pub worktree_target_repo: PathBuf, // worktree操作のターゲットリポジトリ
 }
 
 impl App {
@@ -245,6 +260,7 @@ impl App {
             ahead_behind: None,
             message: None,
             repo,
+            worktree_target_repo: repo_path.clone(),
             repo_path,
             available_repos,
             repo_select_state: ListState::default(),
@@ -260,6 +276,15 @@ impl App {
             pending_diff_command: None,
             remote_tags_cache: HashSet::new(),
             remote_tags_last_fetch: None,
+            available_worktrees: Vec::new(),
+            worktree_type_new: true,
+            worktree_branch_input: String::new(),
+            worktree_base_branch: String::new(),
+            worktree_path_input: String::new(),
+            worktree_field_index: 0,
+            worktree_branches: Vec::new(),
+            worktree_branch_state: ListState::default(),
+            pending_remove_worktree: None,
         };
         app.refresh()?;
         Ok(app)
@@ -891,21 +916,118 @@ impl App {
         Ok(())
     }
 
-    fn open_repo_select(&mut self) {
+    fn refresh_repo_and_worktree_list(&mut self) {
         let base_dir = std::env::current_dir().unwrap_or_default();
-        self.available_repos = detect_repos(&base_dir);
-        // Select current repo in the list
-        let current_idx = self
-            .available_repos
-            .iter()
-            .position(|p| p == &self.repo_path)
-            .unwrap_or(0);
+        let mut repos = detect_repos(&base_dir);
+
+        // 全リポのworktreeを収集（worktreeが2つ以上あるリポのみ）
+        let mut all_worktrees = Vec::new();
+        let mut worktree_paths: HashSet<PathBuf> = HashSet::new();
+        let mut processed_repos: HashSet<PathBuf> = HashSet::new();
+        for repo in &repos {
+            let wts = detect_worktrees(repo);
+            if wts.len() >= 2 {
+                // メインworktreeのパスで重複チェック
+                let main_path = wts[0].repo_path.clone();
+                let main_canonical =
+                    std::fs::canonicalize(&main_path).unwrap_or_else(|_| main_path.clone());
+                if !processed_repos.insert(main_canonical) {
+                    continue; // 同じリポのworktreeは既に処理済み
+                }
+                for wt in &wts {
+                    if !wt.is_main {
+                        worktree_paths.insert(
+                            std::fs::canonicalize(&wt.path).unwrap_or_else(|_| wt.path.clone()),
+                        );
+                    }
+                }
+                all_worktrees.extend(wts);
+            }
+        }
+
+        // worktreeパス（メイン以外）をreposから除外
+        repos.retain(|r| {
+            let canonical = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
+            !worktree_paths.contains(&canonical)
+        });
+
+        self.available_repos = repos;
+        self.available_worktrees = all_worktrees;
+    }
+
+    fn open_repo_select(&mut self) {
+        self.refresh_repo_and_worktree_list();
+        let current_idx = self.selector_current_index();
         self.repo_select_state.select(Some(current_idx));
         self.input_mode = InputMode::RepoSelect;
     }
 
+    /// Total items in the selector (worktrees if >=2 + repos)
+    fn selector_items_count(&self) -> usize {
+        let wt = if self.available_worktrees.len() >= 2 {
+            self.available_worktrees.len()
+        } else {
+            0
+        };
+        wt + self.available_repos.len()
+    }
+
+    /// Get the path for a selector index (worktrees first, then repos)
+    fn selector_path_at(&self, idx: usize) -> Option<PathBuf> {
+        let wt_count = if self.available_worktrees.len() >= 2 {
+            self.available_worktrees.len()
+        } else {
+            0
+        };
+        if idx < wt_count {
+            Some(self.available_worktrees[idx].path.clone())
+        } else {
+            self.available_repos.get(idx - wt_count).cloned()
+        }
+    }
+
+    /// Check if selector index points to a worktree
+    fn selector_is_worktree(&self, idx: usize) -> bool {
+        let wt_count = if self.available_worktrees.len() >= 2 {
+            self.available_worktrees.len()
+        } else {
+            0
+        };
+        idx < wt_count
+    }
+
+    /// Get worktree info at selector index (if it's a worktree)
+    fn selector_worktree_at(&self, idx: usize) -> Option<&WorktreeInfo> {
+        if self.selector_is_worktree(idx) {
+            self.available_worktrees.get(idx)
+        } else {
+            None
+        }
+    }
+
+    /// Find the selector index for the current repo_path
+    fn selector_current_index(&self) -> usize {
+        let wt_count = if self.available_worktrees.len() >= 2 {
+            self.available_worktrees.len()
+        } else {
+            0
+        };
+        // Check worktrees first
+        if wt_count > 0 {
+            if let Some(idx) = self.available_worktrees.iter().position(|w| w.is_current) {
+                return idx;
+            }
+        }
+        // Then repos
+        self.available_repos
+            .iter()
+            .position(|p| p == &self.repo_path)
+            .map(|i| i + wt_count)
+            .unwrap_or(0)
+    }
+
     fn repo_select_next(&mut self) {
-        let len = self.available_repos.len();
+        let len = self.selector_items_count();
         if len > 0 {
             let i = self.repo_select_state.selected().unwrap_or(0);
             self.repo_select_state.select(Some((i + 1) % len));
@@ -913,7 +1035,7 @@ impl App {
     }
 
     fn repo_select_prev(&mut self) {
-        let len = self.available_repos.len();
+        let len = self.selector_items_count();
         if len > 0 {
             let i = self.repo_select_state.selected().unwrap_or(0);
             self.repo_select_state
@@ -1229,6 +1351,232 @@ impl App {
             .count()
     }
 
+    // ========================================================================
+    // Worktree operations
+    // ========================================================================
+
+    fn open_worktree_type_select(&mut self) {
+        // 選択中アイテムからターゲットリポを決定
+        if let Some(idx) = self.repo_select_state.selected() {
+            if let Some(wt) = self.selector_worktree_at(idx) {
+                self.worktree_target_repo = wt.repo_path.clone();
+            } else if let Some(path) = self.selector_path_at(idx) {
+                self.worktree_target_repo = path;
+            }
+        }
+        self.worktree_type_new = true;
+        self.input_mode = InputMode::WorktreeTypeSelect;
+    }
+
+    fn open_worktree_new_branch(&mut self) {
+        self.worktree_branch_input.clear();
+        // ターゲットリポのブランチ名をbase初期値に
+        self.worktree_base_branch = if self.worktree_target_repo == self.repo_path {
+            self.branch_name.clone()
+        } else {
+            Repository::open(&self.worktree_target_repo)
+                .ok()
+                .and_then(|r| {
+                    r.head()
+                        .ok()
+                        .and_then(|h| h.shorthand().map(|s| s.to_string()))
+                })
+                .unwrap_or_else(|| "main".to_string())
+        };
+        self.worktree_path_input.clear();
+        self.worktree_field_index = 0;
+        self.input_mode = InputMode::WorktreeNewBranch;
+    }
+
+    fn open_worktree_existing_branch(&mut self) {
+        // ターゲットリポの実際のworktreeを取得してチェックアウト済みブランチを除外
+        let target_wts = detect_worktrees(&self.worktree_target_repo);
+        let wt_branches: HashSet<String> = target_wts.iter().map(|w| w.branch.clone()).collect();
+
+        self.worktree_branches = Vec::new();
+        // ターゲットリポからブランチ一覧取得
+        let collect_branches = |repo: &Repository| -> Vec<String> {
+            let mut result = Vec::new();
+            if let Ok(branches) = repo.branches(Some(git2::BranchType::Local)) {
+                for branch in branches.flatten() {
+                    if let Some(name) = branch.0.name().ok().flatten() {
+                        if !wt_branches.contains(name) {
+                            result.push(name.to_string());
+                        }
+                    }
+                }
+            }
+            result
+        };
+        if self.worktree_target_repo == self.repo_path {
+            self.worktree_branches = collect_branches(&self.repo);
+        } else if let Ok(repo) = Repository::open(&self.worktree_target_repo) {
+            self.worktree_branches = collect_branches(&repo);
+        }
+
+        if self.worktree_branches.is_empty() {
+            self.message = Some(("No available branches".to_string(), true));
+            self.input_mode = InputMode::RepoSelect;
+            return;
+        }
+
+        self.worktree_branch_state.select(Some(0));
+        self.worktree_field_index = 0;
+        self.update_worktree_path_from_selection();
+        self.input_mode = InputMode::WorktreeExistingBranch;
+    }
+
+    fn update_worktree_path_from_selection(&mut self) {
+        if let Some(idx) = self.worktree_branch_state.selected() {
+            if let Some(branch) = self.worktree_branches.get(idx) {
+                self.worktree_path_input = generate_worktree_path(
+                    &self.worktree_target_repo,
+                    branch,
+                    &self.available_worktrees,
+                );
+            }
+        }
+    }
+
+    fn open_worktree_remove_confirm(&mut self) {
+        let Some(idx) = self.repo_select_state.selected() else {
+            return;
+        };
+        let Some(wt) = self.selector_worktree_at(idx) else {
+            self.message = Some(("Not a worktree".to_string(), true));
+            return;
+        };
+        if wt.is_current {
+            self.message = Some(("Cannot remove current worktree".to_string(), true));
+            return;
+        }
+        if wt.is_main {
+            self.message = Some(("Cannot remove main worktree".to_string(), true));
+            return;
+        }
+        self.pending_remove_worktree = Some(wt.clone());
+        self.input_mode = InputMode::WorktreeRemoveConfirm;
+    }
+
+    fn create_worktree_new_branch(&mut self) -> Result<()> {
+        let branch = self.worktree_branch_input.trim().to_string();
+        let base = self.worktree_base_branch.trim().to_string();
+        if branch.is_empty() {
+            self.message = Some(("Branch name is empty".to_string(), true));
+            return Ok(());
+        }
+        // Auto-generate path if empty
+        if self.worktree_path_input.is_empty() {
+            self.worktree_path_input = generate_worktree_path(
+                &self.worktree_target_repo,
+                &branch,
+                &self.available_worktrees,
+            );
+        }
+        let path_str = self.worktree_path_input.trim().to_string();
+        let abs_path = self.worktree_target_repo.join(&path_str);
+
+        let result = std::process::Command::new("git")
+            .current_dir(&self.worktree_target_repo)
+            .args([
+                "worktree",
+                "add",
+                abs_path.to_str().unwrap_or(""),
+                "-b",
+                &branch,
+                &base,
+            ])
+            .output();
+
+        match result {
+            Ok(o) if o.status.success() => {
+                self.message = Some((format!("Created worktree: {}", branch), false));
+                self.switch_repo(abs_path)?;
+            }
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                self.message = Some((format!("Failed: {}", err.trim()), true));
+                self.input_mode = InputMode::RepoSelect;
+            }
+            Err(e) => {
+                self.message = Some((format!("Failed: {}", e), true));
+                self.input_mode = InputMode::RepoSelect;
+            }
+        }
+        Ok(())
+    }
+
+    fn create_worktree_existing_branch(&mut self) -> Result<()> {
+        let Some(idx) = self.worktree_branch_state.selected() else {
+            return Ok(());
+        };
+        let Some(branch) = self.worktree_branches.get(idx).cloned() else {
+            return Ok(());
+        };
+        if self.worktree_path_input.is_empty() {
+            self.worktree_path_input = generate_worktree_path(
+                &self.worktree_target_repo,
+                &branch,
+                &self.available_worktrees,
+            );
+        }
+        let path_str = self.worktree_path_input.trim().to_string();
+        let abs_path = self.worktree_target_repo.join(&path_str);
+
+        let result = std::process::Command::new("git")
+            .current_dir(&self.worktree_target_repo)
+            .args(["worktree", "add", abs_path.to_str().unwrap_or(""), &branch])
+            .output();
+
+        match result {
+            Ok(o) if o.status.success() => {
+                self.message = Some((format!("Created worktree: {}", branch), false));
+                self.switch_repo(abs_path)?;
+            }
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                self.message = Some((format!("Failed: {}", err.trim()), true));
+                self.input_mode = InputMode::RepoSelect;
+            }
+            Err(e) => {
+                self.message = Some((format!("Failed: {}", e), true));
+                self.input_mode = InputMode::RepoSelect;
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_worktree(&mut self) -> Result<()> {
+        let Some(wt) = self.pending_remove_worktree.take() else {
+            return Ok(());
+        };
+
+        let result = std::process::Command::new("git")
+            .current_dir(&wt.repo_path)
+            .args(["worktree", "remove", wt.path.to_str().unwrap_or("")])
+            .output();
+
+        match result {
+            Ok(o) if o.status.success() => {
+                self.message = Some((format!("Removed worktree: {}", wt.branch), false));
+                self.refresh_repo_and_worktree_list();
+                let current_idx = self.selector_current_index();
+                self.repo_select_state.select(Some(current_idx));
+                self.input_mode = InputMode::RepoSelect;
+            }
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                self.message = Some((format!("Remove failed: {}", err.trim()), true));
+                self.input_mode = InputMode::RepoSelect;
+            }
+            Err(e) => {
+                self.message = Some((format!("Remove failed: {}", e), true));
+                self.input_mode = InputMode::RepoSelect;
+            }
+        }
+        Ok(())
+    }
+
     // === Diff Command (clipboard copy) ===
 
     fn prepare_diff_command(&mut self) {
@@ -1349,7 +1697,7 @@ impl App {
                 KeyCode::Esc => self.input_mode = InputMode::Normal,
                 KeyCode::Enter => {
                     if let Some(idx) = self.repo_select_state.selected()
-                        && let Some(path) = self.available_repos.get(idx).cloned()
+                        && let Some(path) = self.selector_path_at(idx)
                     {
                         if path != self.repo_path {
                             self.switch_repo(path)?;
@@ -1360,6 +1708,8 @@ impl App {
                 }
                 KeyCode::Char('j') | KeyCode::Down => self.repo_select_next(),
                 KeyCode::Char('k') | KeyCode::Up => self.repo_select_prev(),
+                KeyCode::Char('a') => self.open_worktree_type_select(),
+                KeyCode::Char('x') => self.open_worktree_remove_confirm(),
                 _ => {}
             },
             InputMode::TagInput => match code {
@@ -1416,6 +1766,97 @@ impl App {
                     self.pending_diff_command = None;
                 }
                 KeyCode::Enter => self.copy_diff_command()?,
+                _ => {}
+            },
+            InputMode::WorktreeTypeSelect => match code {
+                KeyCode::Esc => self.input_mode = InputMode::RepoSelect,
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.worktree_type_new = !self.worktree_type_new
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.worktree_type_new = !self.worktree_type_new
+                }
+                KeyCode::Enter => {
+                    if self.worktree_type_new {
+                        self.open_worktree_new_branch();
+                    } else {
+                        self.open_worktree_existing_branch();
+                    }
+                }
+                _ => {}
+            },
+            InputMode::WorktreeNewBranch => match code {
+                KeyCode::Esc => self.input_mode = InputMode::WorktreeTypeSelect,
+                KeyCode::Tab => {
+                    self.worktree_field_index = (self.worktree_field_index + 1) % 3;
+                    // Auto-generate path when moving away from Branch field
+                    if self.worktree_field_index != 0 && !self.worktree_branch_input.is_empty() {
+                        self.worktree_path_input = generate_worktree_path(
+                            &self.worktree_target_repo,
+                            &self.worktree_branch_input,
+                            &self.available_worktrees,
+                        );
+                    }
+                }
+                KeyCode::Enter => self.create_worktree_new_branch()?,
+                KeyCode::Backspace => match self.worktree_field_index {
+                    0 => {
+                        self.worktree_branch_input.pop();
+                    }
+                    1 => {
+                        self.worktree_base_branch.pop();
+                    }
+                    2 => {
+                        self.worktree_path_input.pop();
+                    }
+                    _ => {}
+                },
+                KeyCode::Char(c) => match self.worktree_field_index {
+                    0 => self.worktree_branch_input.push(c),
+                    1 => self.worktree_base_branch.push(c),
+                    2 => self.worktree_path_input.push(c),
+                    _ => {}
+                },
+                _ => {}
+            },
+            InputMode::WorktreeExistingBranch => match code {
+                KeyCode::Esc => self.input_mode = InputMode::WorktreeTypeSelect,
+                KeyCode::Char('j') | KeyCode::Down => {
+                    let len = self.worktree_branches.len();
+                    if len > 0 {
+                        let i = self.worktree_branch_state.selected().unwrap_or(0);
+                        self.worktree_branch_state.select(Some((i + 1) % len));
+                        self.update_worktree_path_from_selection();
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    let len = self.worktree_branches.len();
+                    if len > 0 {
+                        let i = self.worktree_branch_state.selected().unwrap_or(0);
+                        self.worktree_branch_state.select(Some(if i == 0 {
+                            len - 1
+                        } else {
+                            i - 1
+                        }));
+                        self.update_worktree_path_from_selection();
+                    }
+                }
+                KeyCode::Tab => {
+                    // Toggle path editing: cycle between list (field 0) and path (field 1)
+                    self.worktree_field_index = if self.worktree_field_index == 0 { 1 } else { 0 };
+                }
+                KeyCode::Backspace if self.worktree_field_index == 1 => {
+                    self.worktree_path_input.pop();
+                }
+                KeyCode::Char(c) if self.worktree_field_index == 1 => {
+                    self.worktree_path_input.push(c);
+                }
+                KeyCode::Enter => self.create_worktree_existing_branch()?,
+                _ => {}
+            },
+            InputMode::WorktreeRemoveConfirm => match code {
+                KeyCode::Esc => self.input_mode = InputMode::RepoSelect,
+                KeyCode::Char('y') => self.remove_worktree()?,
                 _ => {}
             },
             InputMode::Normal => match code {
@@ -1661,6 +2102,100 @@ pub fn format_relative_time(timestamp: i64) -> String {
     } else {
         format!("{} days ago", diff / 86400)
     }
+}
+
+// ============================================================================
+// Worktree support
+// ============================================================================
+
+#[derive(Clone)]
+pub struct WorktreeInfo {
+    pub path: PathBuf,
+    pub branch: String,
+    pub is_current: bool,
+    pub is_main: bool,
+    pub repo_path: PathBuf, // メインworktreeのパス（このworktreeが属するリポジトリ）
+}
+
+/// Detect worktrees for the repository at `repo_path` using `git worktree list --porcelain`.
+pub fn detect_worktrees(repo_path: &std::path::Path) -> Vec<WorktreeInfo> {
+    let output = match std::process::Command::new("git")
+        .current_dir(repo_path)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let current_dir = std::env::current_dir().unwrap_or_default();
+    let current_canonical = std::fs::canonicalize(&current_dir).unwrap_or(current_dir);
+
+    let mut worktrees = Vec::new();
+    let mut path: Option<PathBuf> = None;
+    let mut branch = String::new();
+    let mut is_bare = false;
+    let mut main_path: Option<PathBuf> = None;
+
+    for line in stdout.lines().chain(std::iter::once("")) {
+        if line.is_empty() {
+            // End of entry
+            if let Some(p) = path.take() {
+                if !is_bare {
+                    let p_canonical = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+                    let is_current = p_canonical == current_canonical;
+                    let is_main = worktrees.is_empty(); // First entry is main worktree
+                    if is_main {
+                        main_path = Some(p.clone());
+                    }
+                    worktrees.push(WorktreeInfo {
+                        path: p,
+                        branch: std::mem::take(&mut branch),
+                        is_current,
+                        is_main,
+                        repo_path: main_path.clone().unwrap_or_default(),
+                    });
+                }
+            }
+            is_bare = false;
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            path = Some(PathBuf::from(rest));
+        } else if let Some(rest) = line.strip_prefix("branch refs/heads/") {
+            branch = rest.to_string();
+        } else if line == "bare" {
+            is_bare = true;
+        } else if line == "detached" {
+            branch = "(detached)".to_string();
+        }
+    }
+
+    worktrees
+}
+
+/// Generate worktree path: `../{main_repo_name}-{branch with / replaced by -}`
+/// Uses the main worktree's name (not the current worktree) for consistent naming.
+fn generate_worktree_path(
+    repo_path: &std::path::Path,
+    branch_name: &str,
+    worktrees: &[WorktreeInfo],
+) -> String {
+    // Use main worktree name for consistent path generation
+    let main_name = worktrees
+        .iter()
+        .find(|w| w.is_main)
+        .and_then(|w| w.path.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or_else(|| {
+            repo_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("repo")
+        });
+    let sanitized = branch_name.replace('/', "-");
+    format!("../{}-{}", main_name, sanitized)
 }
 
 /// Detect git repositories in base directory and subdirectories (up to 2 levels)
