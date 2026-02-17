@@ -1,5 +1,6 @@
 use crate::app::{
-    App, FileEntry, FileStatus, HEAD_LABEL, InputMode, Tab, WorktreeInfo, remote_label,
+    App, BranchSelectOp, FileEntry, FileStatus, HEAD_LABEL, InputMode, Tab, WorktreeInfo,
+    remote_label,
 };
 use crate::config::{Config, get_color};
 use ratatui::{
@@ -82,6 +83,8 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
         InputMode::WorktreeNewBranch => render_worktree_new_branch_dialog(frame, app),
         InputMode::WorktreeExistingBranch => render_worktree_existing_branch_dialog(frame, app),
         InputMode::WorktreeRemoveConfirm => render_worktree_remove_dialog(frame, app),
+        InputMode::CherryPickInput => render_cherry_pick_dialog(frame, app),
+        InputMode::BranchSelect => render_branch_select_dialog(frame, app),
         _ => {}
     }
 
@@ -397,6 +400,8 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
             ("Esc", "back"),
         ],
         InputMode::WorktreeRemoveConfirm => vec![("y", "remove"), ("Esc", "cancel")],
+        InputMode::CherryPickInput => vec![("Enter", "cherry-pick"), ("Esc", "cancel")],
+        InputMode::BranchSelect => vec![("j/k", "move"), ("Enter", "execute"), ("Esc", "cancel")],
         InputMode::Normal => match app.tab {
             Tab::Files => {
                 let mut hints = vec![
@@ -405,6 +410,9 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
                     ("x", "discard"),
                     ("c", "commit"),
                     ("P", "push"),
+                    ("C", "cherry-pick"),
+                    ("m", "merge"),
+                    ("b", "rebase"),
                 ];
                 if app.available_repos.len() > 1 {
                     hints.push(("r", "repos"));
@@ -420,6 +428,10 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
                     ("x", "del tag"),
                     ("P", "push"),
                     ("p", "pull"),
+                    ("y", "copy"),
+                    ("C", "cherry-pick"),
+                    ("m", "merge"),
+                    ("b", "rebase"),
                 ];
                 if app.available_repos.len() > 1 {
                     hints.push(("r", "repos"));
@@ -1209,4 +1221,62 @@ fn render_diff_confirm_dialog(frame: &mut Frame, app: &App) {
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
+}
+
+fn render_cherry_pick_dialog(frame: &mut Frame, app: &App) {
+    let area = centered_rect(50, 5, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Cherry-pick ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(colors::blue()));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines = vec![Line::from(vec![
+        Span::styled("Commit hash: > ", Style::default().fg(colors::dim())),
+        Span::styled(
+            &app.cherry_pick_input,
+            Style::default().fg(colors::fg_bright()),
+        ),
+        Span::styled("█", Style::default().fg(colors::fg_bright())),
+    ])];
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_branch_select_dialog(frame: &mut Frame, app: &mut App) {
+    let height = (app.branch_list.len() + 3).min(15) as u16;
+    let title = match app.branch_select_op {
+        BranchSelectOp::Merge => format!(" Merge into {} ", app.branch_name),
+        BranchSelectOp::Rebase => format!(" Rebase {} onto ", app.branch_name),
+    };
+    let area = centered_rect(50, height, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(colors::blue()));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let items: Vec<ListItem> = app
+        .branch_list
+        .iter()
+        .map(|b| {
+            ListItem::new(Line::from(Span::styled(
+                b.clone(),
+                Style::default().fg(colors::fg()),
+            )))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .highlight_style(Style::default().bg(Color::Gray).fg(Color::Rgb(0, 0, 0)))
+        .highlight_symbol("> ");
+
+    frame.render_stateful_widget(list, inner, &mut app.branch_select_state);
 }

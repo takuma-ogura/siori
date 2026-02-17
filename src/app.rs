@@ -60,6 +60,12 @@ pub enum Tab {
     Log,
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum BranchSelectOp {
+    Merge,
+    Rebase,
+}
+
 #[derive(Default, Clone, Copy, PartialEq, Debug)]
 pub enum InputMode {
     #[default]
@@ -77,6 +83,8 @@ pub enum InputMode {
     WorktreeNewBranch,
     WorktreeExistingBranch,
     WorktreeRemoveConfirm,
+    CherryPickInput,
+    BranchSelect,
 }
 
 /// Pending version update information
@@ -219,6 +227,11 @@ pub struct App {
     pub worktree_branch_state: ListState,
     pub pending_remove_worktree: Option<WorktreeInfo>,
     pub worktree_target_repo: PathBuf, // worktree操作のターゲットリポジトリ
+    // Cherry-pick / Merge / Rebase state
+    pub cherry_pick_input: String,
+    pub branch_select_op: BranchSelectOp,
+    pub branch_list: Vec<String>,
+    pub branch_select_state: ListState,
 }
 
 impl App {
@@ -285,6 +298,10 @@ impl App {
             worktree_branches: Vec::new(),
             worktree_branch_state: ListState::default(),
             pending_remove_worktree: None,
+            cherry_pick_input: String::new(),
+            branch_select_op: BranchSelectOp::Merge,
+            branch_list: Vec::new(),
+            branch_select_state: ListState::default(),
         };
         app.refresh()?;
         Ok(app)
@@ -1632,7 +1649,105 @@ impl App {
         Ok(())
     }
 
-    // === View Diff (direct_open mode) ===
+    // === Cherry-pick / Merge / Rebase ===
+
+    fn copy_commit_hash(&mut self) -> Result<()> {
+        let Some(idx) = self.commits_state.selected() else {
+            return Ok(());
+        };
+        let Some(commit) = self.commits.get(idx) else {
+            return Ok(());
+        };
+        let id = commit.id.clone();
+        if let Err(e) = copy_to_clipboard(&id) {
+            self.message = Some((format!("Copy failed: {}", e), true));
+        } else {
+            self.message = Some((format!("Copied: {}", id), false));
+        }
+        Ok(())
+    }
+
+    fn open_cherry_pick_input(&mut self) {
+        self.cherry_pick_input.clear();
+        self.input_mode = InputMode::CherryPickInput;
+    }
+
+    fn execute_cherry_pick(&mut self) -> Result<()> {
+        let hash = self.cherry_pick_input.trim().to_string();
+        if hash.is_empty() {
+            self.message = Some(("Commit hash is empty".to_string(), true));
+            self.input_mode = InputMode::Normal;
+            return Ok(());
+        }
+        let result = run_git(
+            &self.repo_path,
+            &["cherry-pick", &hash],
+            &format!("Cherry-picked: {}", hash),
+            "Cherry-pick failed",
+        );
+        match result {
+            Ok(msg) => {
+                self.message = Some((msg, false));
+                self.refresh()?;
+            }
+            Err(msg) => self.message = Some((msg, true)),
+        }
+        self.input_mode = InputMode::Normal;
+        Ok(())
+    }
+
+    fn open_branch_select(&mut self, op: BranchSelectOp) {
+        self.branch_select_op = op;
+        self.branch_list.clear();
+        if let Ok(branches) = self.repo.branches(Some(git2::BranchType::Local)) {
+            for branch in branches.flatten() {
+                if let Some(name) = branch.0.name().ok().flatten() {
+                    if name != self.branch_name {
+                        self.branch_list.push(name.to_string());
+                    }
+                }
+            }
+        }
+        if self.branch_list.is_empty() {
+            self.message = Some(("No other branches available".to_string(), true));
+            return;
+        }
+        self.branch_select_state.select(Some(0));
+        self.input_mode = InputMode::BranchSelect;
+    }
+
+    fn execute_branch_op(&mut self) -> Result<()> {
+        let Some(idx) = self.branch_select_state.selected() else {
+            return Ok(());
+        };
+        let Some(branch) = self.branch_list.get(idx).cloned() else {
+            return Ok(());
+        };
+        let current = self.branch_name.clone();
+        let result = match self.branch_select_op {
+            BranchSelectOp::Merge => run_git(
+                &self.repo_path,
+                &["merge", &branch],
+                &format!("Merged: {} into {}", branch, current),
+                "Merge failed",
+            ),
+            BranchSelectOp::Rebase => run_git(
+                &self.repo_path,
+                &["rebase", &branch],
+                &format!("Rebased {} onto {}", current, branch),
+                "Rebase failed",
+            ),
+        };
+        match result {
+            Ok(msg) => {
+                self.message = Some((msg, false));
+                self.refresh()?;
+            }
+            Err(msg) => self.message = Some((msg, true)),
+        }
+        self.input_mode = InputMode::Normal;
+        Ok(())
+    }
 
     // ========================================================================
     // Label helpers
@@ -1859,6 +1974,38 @@ impl App {
                 KeyCode::Char('y') => self.remove_worktree()?,
                 _ => {}
             },
+            InputMode::CherryPickInput => match code {
+                KeyCode::Esc => {
+                    self.input_mode = InputMode::Normal;
+                    self.cherry_pick_input.clear();
+                }
+                KeyCode::Enter => self.execute_cherry_pick()?,
+                KeyCode::Backspace => {
+                    self.cherry_pick_input.pop();
+                }
+                KeyCode::Char(c) => self.cherry_pick_input.push(c),
+                _ => {}
+            },
+            InputMode::BranchSelect => match code {
+                KeyCode::Esc => self.input_mode = InputMode::Normal,
+                KeyCode::Char('j') | KeyCode::Down => {
+                    let len = self.branch_list.len();
+                    if len > 0 {
+                        let i = self.branch_select_state.selected().unwrap_or(0);
+                        self.branch_select_state.select(Some((i + 1) % len));
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    let len = self.branch_list.len();
+                    if len > 0 {
+                        let i = self.branch_select_state.selected().unwrap_or(0);
+                        self.branch_select_state
+                            .select(Some(if i == 0 { len - 1 } else { i - 1 }));
+                    }
+                }
+                KeyCode::Enter => self.execute_branch_op()?,
+                _ => {}
+            },
             InputMode::Normal => match code {
                 KeyCode::Char('q') => self.running = false,
                 KeyCode::Tab => self.toggle_tab(),
@@ -1876,6 +2023,10 @@ impl App {
                 KeyCode::Char('x') if self.tab == Tab::Files => self.open_discard_confirm(),
                 KeyCode::Char('x') if self.tab == Tab::Log => self.open_delete_tag_confirm(),
                 KeyCode::Char('e') if self.tab == Tab::Log => self.start_amend()?,
+                KeyCode::Char('y') if self.tab == Tab::Log => self.copy_commit_hash()?,
+                KeyCode::Char('C') => self.open_cherry_pick_input(),
+                KeyCode::Char('m') => self.open_branch_select(BranchSelectOp::Merge),
+                KeyCode::Char('b') => self.open_branch_select(BranchSelectOp::Rebase),
                 KeyCode::Char('r') => self.open_repo_select(),
                 KeyCode::Char('R') => {
                     self.refresh()?;
