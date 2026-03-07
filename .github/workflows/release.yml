@@ -85,6 +85,11 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout source repository
+        uses: actions/checkout@v4
+        with:
+          path: source
+
       - name: Extract version
         id: version
         run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
@@ -127,7 +132,7 @@ jobs:
           DARWIN_INTEL_SHA=${{ steps.checksums.outputs.darwin_intel_sha }}
           LINUX_SHA=${{ steps.checksums.outputs.linux_sha }}
 
-          cp .github/homebrew/siori.rb.template homebrew-siori/Formula/siori.rb
+          cp source/.github/homebrew/siori.rb.template homebrew-siori/Formula/siori.rb
 
           # Replace placeholders
           sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" homebrew-siori/Formula/siori.rb
