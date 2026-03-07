@@ -22,7 +22,21 @@ English | [日本語](README.ja.md)
 
 ```bash
 brew tap takuma-ogura/siori
-brew install siori
+brew install takuma-ogura/siori/siori
+```
+
+To upgrade:
+
+```bash
+brew update
+brew upgrade takuma-ogura/siori/siori
+```
+
+If Homebrew still reports an older version after a release:
+
+```bash
+brew update-reset takuma-ogura/siori
+brew upgrade takuma-ogura/siori/siori
 ```
 
 ### GitHub Releases
@@ -32,6 +46,10 @@ Download the latest binary from [Releases](https://github.com/takuma-ogura/siori
 ```bash
 # macOS (Apple Silicon)
 curl -sL https://github.com/takuma-ogura/siori/releases/latest/download/siori-aarch64-apple-darwin.tar.gz | tar xz
+sudo mv siori /usr/local/bin/
+
+# macOS (Intel)
+curl -sL https://github.com/takuma-ogura/siori/releases/latest/download/siori-x86_64-apple-darwin.tar.gz | tar xz
 sudo mv siori /usr/local/bin/
 
 # Linux (x86_64)

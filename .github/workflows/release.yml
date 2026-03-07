@@ -18,6 +18,8 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
           - target: x86_64-pc-windows-msvc
@@ -93,17 +95,21 @@ jobs:
       - name: Download and calculate checksums
         id: checksums
         run: |
+          set -euo pipefail
           VERSION=${{ steps.version.outputs.version }}
 
           # Download release assets
-          curl -sL "https://github.com/takuma-ogura/siori/releases/download/v${VERSION}/siori-aarch64-apple-darwin.tar.gz" -o darwin-arm.tar.gz
-          curl -sL "https://github.com/takuma-ogura/siori/releases/download/v${VERSION}/siori-x86_64-unknown-linux-gnu.tar.gz" -o linux.tar.gz
+          curl -fsSL --retry 5 --retry-delay 5 "https://github.com/takuma-ogura/siori/releases/download/v${VERSION}/siori-aarch64-apple-darwin.tar.gz" -o darwin-arm.tar.gz
+          curl -fsSL --retry 5 --retry-delay 5 "https://github.com/takuma-ogura/siori/releases/download/v${VERSION}/siori-x86_64-apple-darwin.tar.gz" -o darwin-intel.tar.gz
+          curl -fsSL --retry 5 --retry-delay 5 "https://github.com/takuma-ogura/siori/releases/download/v${VERSION}/siori-x86_64-unknown-linux-gnu.tar.gz" -o linux.tar.gz
 
           # Calculate SHA256
           DARWIN_ARM_SHA=$(sha256sum darwin-arm.tar.gz | cut -d' ' -f1)
+          DARWIN_INTEL_SHA=$(sha256sum darwin-intel.tar.gz | cut -d' ' -f1)
           LINUX_SHA=$(sha256sum linux.tar.gz | cut -d' ' -f1)
 
           echo "darwin_arm_sha=${DARWIN_ARM_SHA}" >> $GITHUB_OUTPUT
+          echo "darwin_intel_sha=${DARWIN_INTEL_SHA}" >> $GITHUB_OUTPUT
           echo "linux_sha=${LINUX_SHA}" >> $GITHUB_OUTPUT
 
       - name: Checkout homebrew-siori
@@ -115,61 +121,31 @@ jobs:
 
       - name: Update formula
         run: |
+          set -euo pipefail
           VERSION=${{ steps.version.outputs.version }}
           DARWIN_ARM_SHA=${{ steps.checksums.outputs.darwin_arm_sha }}
+          DARWIN_INTEL_SHA=${{ steps.checksums.outputs.darwin_intel_sha }}
           LINUX_SHA=${{ steps.checksums.outputs.linux_sha }}
 
-          cat > homebrew-siori/Formula/siori.rb << 'EOF'
-          class Siori < Formula
-            desc "A simple Git TUI for vibe coders"
-            homepage "https://github.com/takuma-ogura/siori"
-            version "VERSION_PLACEHOLDER"
-            license "MIT"
-
-            on_macos do
-              on_arm do
-                url "https://github.com/takuma-ogura/siori/releases/download/vVERSION_PLACEHOLDER/siori-aarch64-apple-darwin.tar.gz"
-                sha256 "DARWIN_ARM_SHA_PLACEHOLDER"
-              end
-              on_intel do
-                # Intel Mac: build from source
-                url "https://github.com/takuma-ogura/siori.git", tag: "vVERSION_PLACEHOLDER"
-                depends_on "rust" => :build
-              end
-            end
-
-            on_linux do
-              on_intel do
-                url "https://github.com/takuma-ogura/siori/releases/download/vVERSION_PLACEHOLDER/siori-x86_64-unknown-linux-gnu.tar.gz"
-                sha256 "LINUX_SHA_PLACEHOLDER"
-              end
-            end
-
-            def install
-              if build.head? || (Hardware::CPU.intel? && OS.mac?)
-                system "cargo", "install", "--locked", "--root", prefix, "--path", "."
-              else
-                bin.install "siori"
-              end
-            end
-
-            test do
-              assert_match "siori", shell_output("#{bin}/siori --help")
-            end
-          end
-          EOF
+          cp .github/homebrew/siori.rb.template homebrew-siori/Formula/siori.rb
 
           # Replace placeholders
           sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" homebrew-siori/Formula/siori.rb
           sed -i "s/DARWIN_ARM_SHA_PLACEHOLDER/${DARWIN_ARM_SHA}/g" homebrew-siori/Formula/siori.rb
+          sed -i "s/DARWIN_INTEL_SHA_PLACEHOLDER/${DARWIN_INTEL_SHA}/g" homebrew-siori/Formula/siori.rb
           sed -i "s/LINUX_SHA_PLACEHOLDER/${LINUX_SHA}/g" homebrew-siori/Formula/siori.rb
 
       - name: Commit and push
         run: |
+          set -euo pipefail
           cd homebrew-siori
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/siori.rb
+          if git diff --cached --quiet; then
+            echo "No formula changes to commit"
+            exit 0
+          fi
           git commit -m "Update siori to v${{ steps.version.outputs.version }}"
           git push
 
