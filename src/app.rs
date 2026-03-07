@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEven
 use git2::{DiffOptions, Repository, Status, StatusOptions};
 use ratatui::widgets::ListState;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -118,6 +118,66 @@ pub enum FileStatus {
     Untracked,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PendingDiscardAction {
+    RestoreTracked,
+    TrashUntracked,
+}
+
+impl PendingDiscardAction {
+    pub fn confirm_title(self) -> &'static str {
+        match self {
+            Self::RestoreTracked => " Discard Changes ",
+            Self::TrashUntracked => " Move to Trash ",
+        }
+    }
+
+    pub fn confirm_heading(self) -> &'static str {
+        match self {
+            Self::RestoreTracked => "Discard changes to:",
+            Self::TrashUntracked => "Move to trash:",
+        }
+    }
+
+    pub fn confirm_warning(self) -> &'static str {
+        match self {
+            Self::RestoreTracked => "This cannot be undone!",
+            Self::TrashUntracked => "You can restore it from the trash.",
+        }
+    }
+
+    pub fn hint_label(self) -> &'static str {
+        match self {
+            Self::RestoreTracked => "discard",
+            Self::TrashUntracked => "trash",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingDiscard {
+    pub path: String,
+    pub action: PendingDiscardAction,
+}
+
+impl PendingDiscard {
+    pub fn for_file(file: &FileEntry) -> std::result::Result<Self, &'static str> {
+        if file.staged {
+            return Err("Unstage file first (Space)");
+        }
+        let action = match file.status {
+            FileStatus::Untracked => PendingDiscardAction::TrashUntracked,
+            FileStatus::Added | FileStatus::Modified | FileStatus::Deleted => {
+                PendingDiscardAction::RestoreTracked
+            }
+        };
+        Ok(Self {
+            path: file.path.clone(),
+            action,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct CommitEntry {
     pub id: String,
@@ -207,8 +267,8 @@ pub struct App {
     pub repo_config: RepoConfig,
     // Pending version update (for confirmation dialog)
     pub pending_version_update: Option<PendingVersionUpdate>,
-    // Pending discard file (for confirmation dialog)
-    pub pending_discard_file: Option<String>,
+    // Pending discard action (for confirmation dialog)
+    pub pending_discard: Option<PendingDiscard>,
     // Pending delete tag (name, was_pushed)
     pub pending_delete_tag: Option<(String, bool)>,
     // Pending diff command (for copy confirmation)
@@ -284,7 +344,7 @@ impl App {
             status_fingerprint: None,
             repo_config,
             pending_version_update: None,
-            pending_discard_file: None,
+            pending_discard: None,
             pending_delete_tag: None,
             pending_diff_command: None,
             remote_tags_cache: HashSet::new(),
@@ -1254,39 +1314,29 @@ impl App {
     // === Discard Changes ===
 
     fn open_discard_confirm(&mut self) {
-        let Some(idx) = self.files_state.selected() else {
-            return;
+        let pending = match self.pending_discard_for_selected_file() {
+            Ok(pending) => pending,
+            Err(message) => {
+                self.message = Some((message, true));
+                return;
+            }
         };
-        let Some(&file_idx) = self.visual_list.get(idx) else {
-            return;
-        };
-        let Some(file) = self.files.get(file_idx) else {
-            return;
-        };
-        if file.staged {
-            self.message = Some(("Unstage file first (Space)".to_string(), true));
-            return;
-        }
-        self.pending_discard_file = Some(file.path.clone());
+        self.pending_discard = Some(pending);
         self.input_mode = InputMode::DiscardConfirm;
     }
 
     fn discard_changes(&mut self) -> Result<()> {
-        let Some(path) = self.pending_discard_file.take() else {
+        let Some(pending) = self.pending_discard.take() else {
             return Ok(());
         };
-        let output = std::process::Command::new("git")
-            .current_dir(&self.repo_path)
-            .args(["restore", &path])
-            .output();
-
-        match output {
-            Ok(o) if o.status.success() => {
-                self.message = Some((format!("Discarded: {path}"), false));
-            }
-            _ => {
-                self.message = Some(("Discard failed".to_string(), true));
-            }
+        match execute_pending_discard_with(
+            &self.repo_path,
+            &pending,
+            run_restore_command,
+            move_to_trash,
+        ) {
+            Ok(message) => self.message = Some((message, false)),
+            Err(message) => self.message = Some((message, true)),
         }
         self.input_mode = InputMode::Normal;
         self.refresh()?;
@@ -1762,6 +1812,26 @@ impl App {
         }
     }
 
+    pub fn selected_file(&self) -> Option<&FileEntry> {
+        let idx = self.files_state.selected()?;
+        let &file_idx = self.visual_list.get(idx)?;
+        self.files.get(file_idx)
+    }
+
+    fn pending_discard_for_selected_file(&self) -> std::result::Result<PendingDiscard, String> {
+        let file = self
+            .selected_file()
+            .ok_or_else(|| "No file selected".to_string())?;
+        PendingDiscard::for_file(file).map_err(ToString::to_string)
+    }
+
+    pub fn files_x_action_label(&self) -> &'static str {
+        self.pending_discard_for_selected_file()
+            .ok()
+            .map(|pending| pending.action.hint_label())
+            .unwrap_or("discard")
+    }
+
     pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
         let code = match code {
             KeyCode::Char(c) => KeyCode::Char(normalize_fullwidth(c)),
@@ -1861,7 +1931,7 @@ impl App {
             InputMode::DiscardConfirm => match code {
                 KeyCode::Esc => {
                     self.input_mode = InputMode::Normal;
-                    self.pending_discard_file = None;
+                    self.pending_discard = None;
                 }
                 KeyCode::Enter => self.discard_changes()?,
                 _ => {}
@@ -2225,6 +2295,65 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     anyhow::bail!("Clipboard not supported on this platform")
+}
+
+fn command_error(output: &std::process::Output, default: &str) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let message = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    if message.is_empty() {
+        default.to_string()
+    } else {
+        message.to_string()
+    }
+}
+
+pub fn execute_pending_discard_with<FRestore, FTrash>(
+    repo_path: &Path,
+    pending: &PendingDiscard,
+    mut restore: FRestore,
+    mut trash: FTrash,
+) -> std::result::Result<String, String>
+where
+    FRestore: FnMut(&Path, &str) -> std::result::Result<(), String>,
+    FTrash: FnMut(&Path, &str) -> std::result::Result<(), String>,
+{
+    match pending.action {
+        PendingDiscardAction::RestoreTracked => {
+            restore(repo_path, &pending.path)?;
+            Ok(format!("Discarded: {}", pending.path))
+        }
+        PendingDiscardAction::TrashUntracked => {
+            trash(repo_path, &pending.path)?;
+            Ok(format!("Moved to trash: {}", pending.path))
+        }
+    }
+}
+
+fn run_restore_command(repo_path: &Path, path: &str) -> std::result::Result<(), String> {
+    let output = std::process::Command::new("git")
+        .current_dir(repo_path)
+        .args(["restore", path])
+        .output()
+        .map_err(|e| format!("Restore failed: {e}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Restore failed: {}",
+            command_error(&output, "git restore failed")
+        ))
+    }
+}
+
+fn move_to_trash(repo_path: &Path, path: &str) -> std::result::Result<(), String> {
+    let full_path = repo_path.join(path);
+    trash::delete(&full_path).map_err(|e| format!("Move to trash failed: {e}"))
 }
 
 /// Normalize full-width ASCII characters to half-width (for Japanese IME support)

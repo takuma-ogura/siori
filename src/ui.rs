@@ -378,7 +378,15 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
         InputMode::TagInput => vec![("Enter", "create tag"), ("Esc", "cancel")],
         InputMode::VersionConfirm => vec![("Enter", "update & tag"), ("Esc", "cancel")],
         InputMode::UncommittedWarning => vec![("Enter", "continue"), ("Esc", "cancel")],
-        InputMode::DiscardConfirm => vec![("Enter", "discard"), ("Esc", "cancel")],
+        InputMode::DiscardConfirm => vec![
+            (
+                "Enter",
+                app.pending_discard
+                    .as_ref()
+                    .map_or("discard", |pending| pending.action.hint_label()),
+            ),
+            ("Esc", "cancel"),
+        ],
         InputMode::DeleteTagConfirm => {
             vec![
                 ("Enter", "delete all"),
@@ -407,7 +415,7 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
                 let mut hints = vec![
                     ("⏎", "diff"),
                     ("Space", "stage"),
-                    ("x", "discard"),
+                    ("x", app.files_x_action_label()),
                     ("c", "commit"),
                     ("P", "push"),
                     ("C", "cherry-pick"),
@@ -921,7 +929,7 @@ fn render_uncommitted_warning_dialog(frame: &mut Frame, _app: &App) {
 }
 
 fn render_discard_confirm_dialog(frame: &mut Frame, app: &App) {
-    let Some(path) = &app.pending_discard_file else {
+    let Some(pending) = &app.pending_discard else {
         return;
     };
 
@@ -929,7 +937,7 @@ fn render_discard_confirm_dialog(frame: &mut Frame, app: &App) {
     frame.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(" Discard Changes ")
+        .title(pending.action.confirm_title())
         .borders(Borders::ALL)
         .border_style(Style::default().fg(colors::red()));
 
@@ -937,14 +945,14 @@ fn render_discard_confirm_dialog(frame: &mut Frame, app: &App) {
     frame.render_widget(block, area);
 
     let lines = vec![
-        Line::from("Discard changes to:"),
+        Line::from(pending.action.confirm_heading()),
         Line::from(Span::styled(
-            path.as_str(),
+            pending.path.as_str(),
             Style::default().fg(colors::yellow()),
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "This cannot be undone!",
+            pending.action.confirm_warning(),
             Style::default().fg(colors::red()),
         )),
     ];

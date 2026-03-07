@@ -1,9 +1,3 @@
-mod app;
-pub mod config;
-mod diff_viewer;
-pub mod ui;
-pub mod version;
-
 use anyhow::{Context, Result};
 use crossterm::{
     ExecutableCommand,
@@ -11,6 +5,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use git2::{Repository, Status, StatusOptions};
+use siori::{app, config, diff_viewer, ui};
 use std::io::stdout;
 use std::path::PathBuf;
 use std::process::Command;
