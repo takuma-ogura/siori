@@ -23,47 +23,63 @@ fn run() -> Result<()> {
 
     let mut last_spinner_tick = Instant::now();
 
-    while app.running {
-        terminal.draw(|f| ui::ui(f, &mut app))?;
+    let mut needs_redraw = true;
 
-        // Tick spinner animation (every 80ms)
+    while app.running {
+        if needs_redraw {
+            terminal.draw(|f| ui::ui(f, &mut app))?;
+            needs_redraw = false;
+        }
+
         if app.processing.is_active() {
             if last_spinner_tick.elapsed() >= Duration::from_millis(80) {
                 app.tick_spinner();
                 last_spinner_tick = Instant::now();
+                needs_redraw = true;
             }
-            // Check if background operation completed
             app.check_processing()?;
+            if !app.processing.is_active() {
+                needs_redraw = true;
+            }
         }
 
-        // 16ms polling for ~60fps responsiveness
-        if event::poll(Duration::from_millis(16))? {
+        let poll_timeout = if app.processing.is_active() {
+            Duration::from_millis(80)
+        } else {
+            Duration::from_millis(500)
+        };
+
+        if event::poll(poll_timeout)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    // Block input during processing
                     if !app.processing.is_active() {
                         app.handle_key(key.code, key.modifiers)?;
                         last_activity = Instant::now();
+                        needs_redraw = true;
                     }
                 }
                 Event::Mouse(mouse) => {
                     if !app.processing.is_active() {
                         app.handle_mouse(mouse)?;
                         last_activity = Instant::now();
+                        needs_redraw = true;
                     }
+                }
+                Event::Resize(..) => {
+                    needs_redraw = true;
                 }
                 _ => {}
             }
         }
 
-        // Auto-refresh ONLY when idle (no input for 2+ seconds) and not processing
         let idle_time = last_activity.elapsed();
         if !app.processing.is_active()
             && idle_time >= Duration::from_secs(2)
-            && last_refresh.elapsed() >= Duration::from_secs(3)
+            && last_refresh.elapsed() >= Duration::from_secs(10)
         {
             let _ = app.refresh_status_only();
             last_refresh = Instant::now();
+            needs_redraw = true;
         }
     }
 
