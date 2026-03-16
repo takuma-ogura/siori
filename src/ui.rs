@@ -380,7 +380,7 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
         InputMode::UncommittedWarning => vec![("Enter", "continue"), ("Esc", "cancel")],
         InputMode::DiscardConfirm => vec![
             (
-                "Enter",
+                "⏎/x",
                 app.pending_discard
                     .as_ref()
                     .map_or("discard", |pending| pending.action.hint_label()),

@@ -1933,7 +1933,7 @@ impl App {
                     self.input_mode = InputMode::Normal;
                     self.pending_discard = None;
                 }
-                KeyCode::Enter => self.discard_changes()?,
+                KeyCode::Enter | KeyCode::Char('x') => self.discard_changes()?,
                 _ => {}
             },
             InputMode::DeleteTagConfirm => match code {
