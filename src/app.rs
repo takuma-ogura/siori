@@ -269,6 +269,7 @@ pub struct App {
     pub pending_version_update: Option<PendingVersionUpdate>,
     // Pending discard action (for confirmation dialog)
     pub pending_discard: Option<PendingDiscard>,
+    pub pending_discard_all: Option<Vec<PendingDiscard>>,
     // Pending delete tag (name, was_pushed)
     pub pending_delete_tag: Option<(String, bool)>,
     // Pending diff command (for copy confirmation)
@@ -345,6 +346,7 @@ impl App {
             repo_config,
             pending_version_update: None,
             pending_discard: None,
+            pending_discard_all: None,
             pending_delete_tag: None,
             pending_diff_command: None,
             remote_tags_cache: HashSet::new(),
@@ -843,6 +845,37 @@ impl App {
         Ok(())
     }
 
+    fn stage_all(&mut self) -> Result<()> {
+        let has_unstaged = self.files.iter().any(|f| !f.staged);
+        let output = if has_unstaged {
+            std::process::Command::new("git")
+                .current_dir(&self.repo_path)
+                .args(["add", "-A"])
+                .output()
+        } else {
+            std::process::Command::new("git")
+                .current_dir(&self.repo_path)
+                .args(["reset", "HEAD"])
+                .output()
+        };
+        match output {
+            Ok(out) if out.status.success() => {
+                let action = if has_unstaged { "Staged all" } else { "Unstaged all" };
+                self.message = Some((action.to_string(), false));
+            }
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr);
+                self.message = Some((format!("Failed: {}", err.trim()), true));
+            }
+            Err(e) => {
+                self.message = Some((format!("Failed: {}", e), true));
+            }
+        }
+        self.refresh_status()?;
+        self.files_state.select(Some(0));
+        Ok(())
+    }
+
     fn commit(&mut self) -> Result<()> {
         let message = self.commit_message.trim().to_string();
         if message.is_empty() {
@@ -1338,6 +1371,49 @@ impl App {
             Ok(message) => self.message = Some((message, false)),
             Err(message) => self.message = Some((message, true)),
         }
+        self.input_mode = InputMode::Normal;
+        self.refresh()?;
+        Ok(())
+    }
+
+    fn open_discard_all_confirm(&mut self) {
+        let targets: Vec<PendingDiscard> = self
+            .files
+            .iter()
+            .filter(|f| !f.staged)
+            .filter_map(|f| PendingDiscard::for_file(f).ok())
+            .collect();
+        if targets.is_empty() {
+            self.message = Some(("No unstaged changes to discard".to_string(), true));
+            return;
+        }
+        self.pending_discard_all = Some(targets);
+        self.input_mode = InputMode::DiscardConfirm;
+    }
+
+    fn discard_all_changes(&mut self) -> Result<()> {
+        let Some(targets) = self.pending_discard_all.take() else {
+            return Ok(());
+        };
+        let mut success = 0usize;
+        let mut failure = 0usize;
+        for pending in &targets {
+            match execute_pending_discard_with(
+                &self.repo_path,
+                pending,
+                run_restore_command,
+                move_to_trash,
+            ) {
+                Ok(_) => success += 1,
+                Err(_) => failure += 1,
+            }
+        }
+        let msg = if failure == 0 {
+            format!("Discarded all {} files", success)
+        } else {
+            format!("Discarded {} files ({} failed)", success, failure)
+        };
+        self.message = Some((msg, failure > 0));
         self.input_mode = InputMode::Normal;
         self.refresh()?;
         Ok(())
@@ -1932,6 +2008,12 @@ impl App {
                 KeyCode::Esc => {
                     self.input_mode = InputMode::Normal;
                     self.pending_discard = None;
+                    self.pending_discard_all = None;
+                }
+                KeyCode::Enter | KeyCode::Char('x') | KeyCode::Char('X')
+                    if self.pending_discard_all.is_some() =>
+                {
+                    self.discard_all_changes()?
                 }
                 KeyCode::Enter | KeyCode::Char('x') => self.discard_changes()?,
                 _ => {}
@@ -2083,6 +2165,7 @@ impl App {
                 KeyCode::Char('k') | KeyCode::Up => self.select_prev(),
                 KeyCode::Enter => self.open_diff_confirm()?,
                 KeyCode::Char(' ') if self.tab == Tab::Files => self.stage_selected()?,
+                KeyCode::Char('a') if self.tab == Tab::Files => self.stage_all()?,
                 KeyCode::Char('c') if self.tab == Tab::Files => {
                     self.input_mode = InputMode::Insert;
                 }
@@ -2091,6 +2174,7 @@ impl App {
                 KeyCode::Char('t') if self.tab == Tab::Log => self.open_tag_input(),
                 KeyCode::Char('T') if self.tab == Tab::Log => self.push_tags()?,
                 KeyCode::Char('x') if self.tab == Tab::Files => self.open_discard_confirm(),
+                KeyCode::Char('X') if self.tab == Tab::Files => self.open_discard_all_confirm(),
                 KeyCode::Char('x') if self.tab == Tab::Log => self.open_delete_tag_confirm(),
                 KeyCode::Char('e') if self.tab == Tab::Log => self.start_amend()?,
                 KeyCode::Char('y') if self.tab == Tab::Log => self.copy_commit_hash()?,

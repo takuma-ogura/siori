@@ -415,7 +415,9 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
                 let mut hints = vec![
                     ("⏎", "diff"),
                     ("Space", "stage"),
+                    ("a", "stage all"),
                     ("x", app.files_x_action_label()),
+                    ("X", "discard all"),
                     ("c", "commit"),
                     ("P", "push"),
                     ("C", "cherry-pick"),
@@ -929,6 +931,32 @@ fn render_uncommitted_warning_dialog(frame: &mut Frame, _app: &App) {
 }
 
 fn render_discard_confirm_dialog(frame: &mut Frame, app: &App) {
+    if let Some(targets) = &app.pending_discard_all {
+        let area = centered_rect(45, 6, frame.area());
+        frame.render_widget(Clear, area);
+
+        let block = Block::default()
+            .title(" Discard All Changes ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(colors::red()));
+
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let lines = vec![
+            Line::from(format!("Discard all {} unstaged files?", targets.len())),
+            Line::from(""),
+            Line::from(Span::styled(
+                "This cannot be undone!",
+                Style::default().fg(colors::red()),
+            )),
+        ];
+
+        let paragraph = Paragraph::new(lines).alignment(Alignment::Center);
+        frame.render_widget(paragraph, inner);
+        return;
+    }
+
     let Some(pending) = &app.pending_discard else {
         return;
     };

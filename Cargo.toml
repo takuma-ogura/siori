@@ -26,3 +26,7 @@ trash = "5.2.5"
 [[test]]
 name = "discard_behavior"
 path = "test/discard_behavior.rs"
+
+[[test]]
+name = "bulk_operations"
+path = "test/bulk_operations.rs"
