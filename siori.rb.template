@@ -1,0 +1,32 @@
+class Siori < Formula
+  desc "A simple Git TUI for vibe coders"
+  homepage "https://github.com/takuma-ogura/siori"
+  version "VERSION_PLACEHOLDER"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/takuma-ogura/siori/releases/download/vVERSION_PLACEHOLDER/siori-aarch64-apple-darwin.tar.gz"
+      sha256 "DARWIN_ARM_SHA_PLACEHOLDER"
+    end
+    on_intel do
+      url "https://github.com/takuma-ogura/siori/releases/download/vVERSION_PLACEHOLDER/siori-x86_64-apple-darwin.tar.gz"
+      sha256 "DARWIN_INTEL_SHA_PLACEHOLDER"
+    end
+  end
+
+  on_linux do
+    on_intel do
+      url "https://github.com/takuma-ogura/siori/releases/download/vVERSION_PLACEHOLDER/siori-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "LINUX_SHA_PLACEHOLDER"
+    end
+  end
+
+  def install
+    bin.install "siori"
+  end
+
+  test do
+    assert_match "siori", shell_output("#{bin}/siori --help")
+  end
+end
