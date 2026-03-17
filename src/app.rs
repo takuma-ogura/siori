@@ -178,6 +178,12 @@ impl PendingDiscard {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum PendingDiscardTarget {
+    Single(PendingDiscard),
+    All(Vec<PendingDiscard>),
+}
+
 #[derive(Clone)]
 pub struct CommitEntry {
     pub id: String,
@@ -268,8 +274,7 @@ pub struct App {
     // Pending version update (for confirmation dialog)
     pub pending_version_update: Option<PendingVersionUpdate>,
     // Pending discard action (for confirmation dialog)
-    pub pending_discard: Option<PendingDiscard>,
-    pub pending_discard_all: Option<Vec<PendingDiscard>>,
+    pub pending_discard: Option<PendingDiscardTarget>,
     // Pending delete tag (name, was_pushed)
     pub pending_delete_tag: Option<(String, bool)>,
     // Pending diff command (for copy confirmation)
@@ -346,7 +351,6 @@ impl App {
             repo_config,
             pending_version_update: None,
             pending_discard: None,
-            pending_discard_all: None,
             pending_delete_tag: None,
             pending_diff_command: None,
             remote_tags_cache: HashSet::new(),
@@ -860,7 +864,11 @@ impl App {
         };
         match output {
             Ok(out) if out.status.success() => {
-                let action = if has_unstaged { "Staged all" } else { "Unstaged all" };
+                let action = if has_unstaged {
+                    "Staged all"
+                } else {
+                    "Unstaged all"
+                };
                 self.message = Some((action.to_string(), false));
             }
             Ok(out) => {
@@ -1354,12 +1362,12 @@ impl App {
                 return;
             }
         };
-        self.pending_discard = Some(pending);
+        self.pending_discard = Some(PendingDiscardTarget::Single(pending));
         self.input_mode = InputMode::DiscardConfirm;
     }
 
     fn discard_changes(&mut self) -> Result<()> {
-        let Some(pending) = self.pending_discard.take() else {
+        let Some(PendingDiscardTarget::Single(pending)) = self.pending_discard.take() else {
             return Ok(());
         };
         match execute_pending_discard_with(
@@ -1380,34 +1388,55 @@ impl App {
         let targets: Vec<PendingDiscard> = self
             .files
             .iter()
-            .filter(|f| !f.staged)
             .filter_map(|f| PendingDiscard::for_file(f).ok())
             .collect();
         if targets.is_empty() {
             self.message = Some(("No unstaged changes to discard".to_string(), true));
             return;
         }
-        self.pending_discard_all = Some(targets);
+        self.pending_discard = Some(PendingDiscardTarget::All(targets));
         self.input_mode = InputMode::DiscardConfirm;
     }
 
     fn discard_all_changes(&mut self) -> Result<()> {
-        let Some(targets) = self.pending_discard_all.take() else {
+        let Some(PendingDiscardTarget::All(targets)) = self.pending_discard.take() else {
             return Ok(());
         };
+
+        // Batch restore tracked files in a single git command
+        let restore_paths: Vec<&str> = targets
+            .iter()
+            .filter(|p| p.action == PendingDiscardAction::RestoreTracked)
+            .map(|p| p.path.as_str())
+            .collect();
+
         let mut success = 0usize;
         let mut failure = 0usize;
-        for pending in &targets {
-            match execute_pending_discard_with(
-                &self.repo_path,
-                pending,
-                run_restore_command,
-                move_to_trash,
-            ) {
-                Ok(_) => success += 1,
+
+        if !restore_paths.is_empty() {
+            let mut args = vec!["restore", "--"];
+            args.extend(&restore_paths);
+            let output = std::process::Command::new("git")
+                .current_dir(&self.repo_path)
+                .args(&args)
+                .output();
+            match output {
+                Ok(out) if out.status.success() => success += restore_paths.len(),
+                _ => failure += restore_paths.len(),
+            }
+        }
+
+        // Trash untracked files individually
+        for pending in targets
+            .iter()
+            .filter(|p| p.action == PendingDiscardAction::TrashUntracked)
+        {
+            match move_to_trash(&self.repo_path, &pending.path) {
+                Ok(()) => success += 1,
                 Err(_) => failure += 1,
             }
         }
+
         let msg = if failure == 0 {
             format!("Discarded all {} files", success)
         } else {
@@ -2008,14 +2037,14 @@ impl App {
                 KeyCode::Esc => {
                     self.input_mode = InputMode::Normal;
                     self.pending_discard = None;
-                    self.pending_discard_all = None;
                 }
-                KeyCode::Enter | KeyCode::Char('x') | KeyCode::Char('X')
-                    if self.pending_discard_all.is_some() =>
-                {
-                    self.discard_all_changes()?
+                KeyCode::Enter | KeyCode::Char('x') | KeyCode::Char('X') => {
+                    match &self.pending_discard {
+                        Some(PendingDiscardTarget::All(_)) => self.discard_all_changes()?,
+                        Some(PendingDiscardTarget::Single(_)) => self.discard_changes()?,
+                        None => {}
+                    }
                 }
-                KeyCode::Enter | KeyCode::Char('x') => self.discard_changes()?,
                 _ => {}
             },
             InputMode::DeleteTagConfirm => match code {

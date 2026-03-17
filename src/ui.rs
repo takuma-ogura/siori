@@ -1,6 +1,6 @@
 use crate::app::{
-    App, BranchSelectOp, FileEntry, FileStatus, HEAD_LABEL, InputMode, Tab, WorktreeInfo,
-    remote_label,
+    App, BranchSelectOp, FileEntry, FileStatus, HEAD_LABEL, InputMode, PendingDiscardTarget, Tab,
+    WorktreeInfo, remote_label,
 };
 use crate::config::{Config, get_color};
 use ratatui::{
@@ -381,9 +381,11 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
         InputMode::DiscardConfirm => vec![
             (
                 "⏎/x",
-                app.pending_discard
-                    .as_ref()
-                    .map_or("discard", |pending| pending.action.hint_label()),
+                match &app.pending_discard {
+                    Some(PendingDiscardTarget::Single(p)) => p.action.hint_label(),
+                    Some(PendingDiscardTarget::All(_)) => "discard all",
+                    None => "discard",
+                },
             ),
             ("Esc", "cancel"),
         ],
@@ -931,62 +933,47 @@ fn render_uncommitted_warning_dialog(frame: &mut Frame, _app: &App) {
 }
 
 fn render_discard_confirm_dialog(frame: &mut Frame, app: &App) {
-    if let Some(targets) = &app.pending_discard_all {
-        let area = centered_rect(45, 6, frame.area());
-        frame.render_widget(Clear, area);
-
-        let block = Block::default()
-            .title(" Discard All Changes ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(colors::red()));
-
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        let lines = vec![
-            Line::from(format!("Discard all {} unstaged files?", targets.len())),
-            Line::from(""),
-            Line::from(Span::styled(
-                "This cannot be undone!",
-                Style::default().fg(colors::red()),
-            )),
-        ];
-
-        let paragraph = Paragraph::new(lines).alignment(Alignment::Center);
-        frame.render_widget(paragraph, inner);
-        return;
-    }
-
-    let Some(pending) = &app.pending_discard else {
-        return;
+    let (title, lines) = match &app.pending_discard {
+        Some(PendingDiscardTarget::All(targets)) => (
+            " Discard All Changes ",
+            vec![
+                Line::from(format!("Discard all {} unstaged files?", targets.len())),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "This cannot be undone!",
+                    Style::default().fg(colors::red()),
+                )),
+            ],
+        ),
+        Some(PendingDiscardTarget::Single(pending)) => (
+            pending.action.confirm_title(),
+            vec![
+                Line::from(pending.action.confirm_heading()),
+                Line::from(Span::styled(
+                    pending.path.as_str(),
+                    Style::default().fg(colors::yellow()),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    pending.action.confirm_warning(),
+                    Style::default().fg(colors::red()),
+                )),
+            ],
+        ),
+        None => return,
     };
 
     let area = centered_rect(45, 6, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(pending.action.confirm_title())
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(colors::red()));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
-
-    let lines = vec![
-        Line::from(pending.action.confirm_heading()),
-        Line::from(Span::styled(
-            pending.path.as_str(),
-            Style::default().fg(colors::yellow()),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            pending.action.confirm_warning(),
-            Style::default().fg(colors::red()),
-        )),
-    ];
-
-    let paragraph = Paragraph::new(lines).alignment(Alignment::Center);
-    frame.render_widget(paragraph, inner);
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 }
 
 fn render_delete_tag_confirm_dialog(frame: &mut Frame, app: &App) {
