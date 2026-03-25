@@ -958,11 +958,30 @@ impl App {
             return Ok(());
         }
 
-        // Run push in background
+        // Check if upstream is configured
+        let has_upstream = std::process::Command::new("git")
+            .current_dir(&self.repo_path)
+            .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
         let repo_path = self.repo_path.clone();
-        self.start_processing(Processing::Pushing, move || {
-            run_git(&repo_path, &["push"], "Pushed successfully", "Push failed")
-        });
+        if has_upstream {
+            self.start_processing(Processing::Pushing, move || {
+                run_git(&repo_path, &["push"], "Pushed successfully", "Push failed")
+            });
+        } else {
+            let branch = self.branch_name.clone();
+            self.start_processing(Processing::Pushing, move || {
+                run_git(
+                    &repo_path,
+                    &["push", "-u", "origin", &branch],
+                    "Pushed successfully",
+                    "Push failed",
+                )
+            });
+        }
         Ok(())
     }
 
